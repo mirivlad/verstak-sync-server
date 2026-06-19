@@ -1,0 +1,15 @@
+# Binaries
+server
+verstak-sync-server
+*.exe
+
+# Data directory
+server-data/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
