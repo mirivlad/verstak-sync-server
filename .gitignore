@@ -1,6 +1,6 @@
 # Binaries
-server
-verstak-sync-server
+/server
+/verstak-sync-server
 *.exe
 
 # Data directory
