@@ -158,6 +158,10 @@ func NewServer(dbPath, dataDir string, cfg *Config) (*Server, error) {
 	return s, nil
 }
 
+func (s *Server) SetupRoutes() {
+	s.routes()
+}
+
 func (s *Server) Close() error {
 	return s.db.Close()
 }

@@ -62,6 +62,26 @@ CREATE TABLE IF NOT EXISTS server_idempotency_keys (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS server_email_tokens (
+    token TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS server_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    op_id TEXT NOT NULL,
+    device_id TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS server_blobs (
+    sha256 TEXT PRIMARY KEY,
+    size INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS server_audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type TEXT NOT NULL,
