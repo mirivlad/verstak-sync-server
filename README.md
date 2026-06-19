@@ -14,24 +14,24 @@ This server provides synchronization between devices running Verstak2. It handle
 ## Quick Start
 
 ```bash
-# Build
-go build -o verstak-sync-server ./cmd/server
+# Build (produces binary at build/bin/verstak-sync-server)
+./scripts/build.sh
 
 # Run
-./verstak-sync-server -port 47732 -data ./server-data
+./build/bin/verstak-sync-server --port 47732 --data ./server-data
 
 # First run with admin user
-./verstak-sync-server -admin-user admin -admin-pass secret
+./build/bin/verstak-sync-server --admin-user admin --admin-pass secret
 ```
 
 ## Configuration
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-port` | 47732 | HTTP port |
-| `-data` | ./server-data | Data directory |
-| `-admin-user` | | Create admin user (first run) |
-| `-admin-pass` | | Admin password (first run) |
+| `--port` | 47732 | HTTP port |
+| `--data` | ./server-data | Data directory |
+| `--admin-user` | | Create admin user (first run) |
+| `--admin-pass` | | Admin password (first run) |
 
 ## Architecture
 

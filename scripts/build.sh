@@ -1,21 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+OUTPUT_DIR="$REPO_ROOT/build/bin"
+BINARY="$OUTPUT_DIR/verstak-sync-server"
 
-echo "=== verstak-sync-server build ==="
-if [ -f "$ROOT/go.mod" ]; then
-  echo "[go build]"
-  (cd "$ROOT" && go build ./...)
-  echo "  ✅ go build"
-  if go test -list . ./... &>/dev/null 2>&1; then
-    (cd "$ROOT" && go test -count=1 ./... 2>&1 || true)
-  else
-    echo "  ℹ️  no tests"
-  fi
-else
-  echo "  ℹ️  repository empty — no build target yet"
-  echo "  📝 This repo will hold the Verstak sync server (CRDT-based)"
+echo "=== Verstak Sync Server Build ==="
+
+# Check dependencies
+if ! command -v go &>/dev/null; then
+  echo "❌ go not found"
+  exit 1
 fi
+echo "✅ go $(go version | awk '{print $3}')"
+
+# Clean
+rm -rf "$OUTPUT_DIR"
+mkdir -p "$OUTPUT_DIR"
+
+# Build
+echo "→ Building server binary..."
+cd "$REPO_ROOT"
+go build -o "$BINARY" ./cmd/server
+echo "✅ Binary built: $BINARY"
+ls -lh "$BINARY"
+
+# Tests
+echo "→ Running tests..."
+go test ./...
+echo "✅ Tests passed"
+
 echo ""
-echo "✅ build passed (no-op)"
+echo "=== Build Complete ==="
+echo "Binary: $BINARY"
+echo "Run: $BINARY --help"
