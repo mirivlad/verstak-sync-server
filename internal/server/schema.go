@@ -101,4 +101,9 @@ CREATE INDEX IF NOT EXISTS idx_server_users_username ON server_users(username);
 CREATE INDEX IF NOT EXISTS idx_server_users_email ON server_users(email);
 CREATE INDEX IF NOT EXISTS idx_server_audit_log_event ON server_audit_log(event_type);
 CREATE INDEX IF NOT EXISTS idx_server_audit_log_created ON server_audit_log(created_at);
+
+CREATE TABLE IF NOT EXISTS server_smtp_config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 `

@@ -162,6 +162,10 @@ func (s *Server) SetupRoutes() {
 	s.routes()
 }
 
+func (s *Server) locale() string {
+	return "ru"
+}
+
 func (s *Server) Close() error {
 	return s.db.Close()
 }
