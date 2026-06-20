@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
+	"github.com/verstak/verstak-sync-server/internal/server"
 )
 
 func main() {
@@ -24,12 +26,30 @@ func main() {
 		log.Fatalf("create data dir: %v", err)
 	}
 
-	// First-run admin setup.
+	cfg, err := server.LoadConfig(absData)
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+
 	if *adminUser != "" && *adminPass != "" {
+		if err := cfg.SetAdmin(*adminUser, *adminPass); err != nil {
+			log.Fatalf("set admin: %v", err)
+		}
 		fmt.Printf("Admin user %q created.\n", *adminUser)
 	}
 
+	dbPath := filepath.Join(absData, "server.db")
+	srv, err := server.NewServer(dbPath, absData, cfg)
+	if err != nil {
+		log.Fatalf("server: %v", err)
+	}
+	defer srv.Close()
+
+	srv.SetupRoutes()
+
 	addr := fmt.Sprintf(":%d", *port)
 	log.Printf("Verstak Sync Server starting on %s (data: %s)", addr, absData)
-	log.Fatal(fmt.Errorf("server not yet implemented"))
+	if err := srv.ListenAndServe(addr); err != nil {
+		log.Fatalf("serve: %v", err)
+	}
 }
