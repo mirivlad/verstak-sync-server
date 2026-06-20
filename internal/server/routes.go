@@ -16,5 +16,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/auth/login", s.handleUserLogin)
 	s.mux.HandleFunc("/api/v1/auth/forgot", s.handleForgot)
 	s.mux.HandleFunc("/api/v1/auth/reset", s.handleReset)
+	s.mux.HandleFunc("/admin/login", s.handleAdminLogin)
+	s.mux.HandleFunc("/admin/dashboard", s.handleAdminDashboard)
+	s.mux.HandleFunc("/admin/users", s.handleAdminUsers)
+	s.mux.HandleFunc("/admin/devices", s.handleAdminDevices)
 	s.mux.HandleFunc("/", s.handleNotFound)
 }
