@@ -132,7 +132,51 @@ func TestSyncPushPullStoresSequencedOps(t *testing.T) {
 	}
 }
 
+func TestRevokedLegacyAPIKeyCannotPushOrPull(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewServer(filepath.Join(dir, "test.db"), filepath.Join(dir, "data"), &Config{Port: 47732})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer s.Close()
+	s.SetupRoutes()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := s.db.Exec(
+		"INSERT INTO server_devices (id, name, api_key, last_seen, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		"device-revoked", "Revoked Device", "revoked-key", now, now, now,
+	); err != nil {
+		t.Fatalf("insert device: %v", err)
+	}
+	ts := httptest.NewServer(s.mux)
+	defer ts.Close()
+
+	pushStatus, pushResp := postJSONStatus(t, ts.URL+"/api/v1/sync/push", "revoked-key", map[string]interface{}{
+		"device_id": "device-revoked",
+		"ops":       []map[string]interface{}{},
+	})
+	if pushStatus != http.StatusUnauthorized || pushResp["error"] != "device revoked" {
+		t.Fatalf("push status=%d resp=%#v, want 401 device revoked", pushStatus, pushResp)
+	}
+
+	pullStatus, pullResp := postJSONStatus(t, ts.URL+"/api/v1/sync/pull", "revoked-key", map[string]interface{}{
+		"since_sequence": 0,
+	})
+	if pullStatus != http.StatusUnauthorized || pullResp["error"] != "device revoked" {
+		t.Fatalf("pull status=%d resp=%#v, want 401 device revoked", pullStatus, pullResp)
+	}
+}
+
 func postJSON(t *testing.T, url, token string, body interface{}) map[string]interface{} {
+	t.Helper()
+	status, out := postJSONStatus(t, url, token, body)
+	if status != http.StatusOK {
+		t.Fatalf("post %s status = %d", url, status)
+	}
+	return out
+}
+
+func postJSONStatus(t *testing.T, url, token string, body interface{}) (int, map[string]interface{}) {
 	t.Helper()
 	var b bytes.Buffer
 	if err := json.NewEncoder(&b).Encode(body); err != nil {
@@ -149,12 +193,9 @@ func postJSON(t *testing.T, url, token string, body interface{}) map[string]inte
 		t.Fatalf("post %s: %v", url, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("post %s status = %d", url, resp.StatusCode)
-	}
 	var out map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	return out
+	return resp.StatusCode, out
 }
