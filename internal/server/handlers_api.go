@@ -468,7 +468,7 @@ func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
 		PayloadJSON    string `json:"payload_json"`
 		CreatedAt      string `json:"created_at"`
 	}
-	var ops []opDTO
+	ops := []opDTO{}
 	for rows.Next() {
 		var o opDTO
 		if err := rows.Scan(&o.OpID, &o.ServerSequence, &o.DeviceID, &o.EntityType, &o.EntityID, &o.OpType, &o.PayloadJSON, &o.CreatedAt); err != nil {
