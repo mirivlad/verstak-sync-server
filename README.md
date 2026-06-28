@@ -33,6 +33,95 @@ This server provides synchronization between devices running Verstak2. It handle
 | `--admin-user` | | Create admin user (first run) |
 | `--admin-pass` | | Admin password (first run) |
 
+Production installs use:
+
+- binary: `/opt/verstak-sync-server/verstak-sync-server`;
+- data directory: `/var/lib/verstak-sync-server`;
+- port environment file: `/etc/verstak-server/env`;
+- service: `verstak-server`.
+
+Install from a built binary:
+
+```bash
+./scripts/build.sh
+sudo ./scripts/install.sh \
+  --bin ./build/bin/verstak-sync-server \
+  --port 47732 \
+  --admin-user admin \
+  --admin-pass 'change-this-password'
+```
+
+The install script creates a locked-down system user, initializes the data
+directory, writes `/etc/verstak-server/env`, installs the systemd unit, and
+starts the service.
+
+## Deployment
+
+Run the service behind HTTPS in production. The sync server itself listens on
+plain HTTP; terminate TLS in a reverse proxy such as nginx, Caddy, or a platform
+load balancer, then forward to `127.0.0.1:47732`.
+
+Basic service operations:
+
+```bash
+sudo systemctl status verstak-server
+sudo journalctl -u verstak-server -f
+curl http://127.0.0.1:47732/api/v1/health
+```
+
+Change the listen port:
+
+```bash
+echo 'VERSTAK_PORT=47733' | sudo tee /etc/verstak-server/env
+sudo systemctl restart verstak-server
+```
+
+Upgrade the binary:
+
+```bash
+./scripts/build.sh
+sudo systemctl stop verstak-server
+sudo install -m 755 ./build/bin/verstak-sync-server /opt/verstak-sync-server/verstak-sync-server
+sudo systemctl start verstak-server
+```
+
+Keep `--data` stable across upgrades. The data directory is the server's source
+of truth.
+
+## Backup And Restore
+
+Back up the full data directory while the service is stopped. It contains:
+
+- `server.db` - SQLite database with users, devices, operations, SMTP settings,
+  and blob metadata;
+- `config.yml` - admin user configuration;
+- `blobs/` - content-addressed blob files.
+
+Create a backup:
+
+```bash
+sudo systemctl stop verstak-server
+sudo tar --xattrs --acls -czf verstak-sync-backup-$(date +%Y%m%d-%H%M%S).tar.gz \
+  -C /var/lib verstak-sync-server
+sudo systemctl start verstak-server
+```
+
+Restore onto a fresh host or after data loss:
+
+```bash
+sudo systemctl stop verstak-server
+sudo mv /var/lib/verstak-sync-server /var/lib/verstak-sync-server.broken.$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
+sudo tar --xattrs --acls -xzf verstak-sync-backup-YYYYMMDD-HHMMSS.tar.gz -C /var/lib
+sudo chown -R verstak:verstak /var/lib/verstak-sync-server
+sudo chmod 750 /var/lib/verstak-sync-server
+sudo systemctl start verstak-server
+curl http://127.0.0.1:${VERSTAK_PORT:-47732}/api/v1/health
+```
+
+After restore, connected desktop clients keep their existing device tokens.
+If a backup is older than some client changes, those clients may need to run
+sync again so unpushed local operations are re-sent.
+
 ## Architecture
 
 ```

@@ -7,7 +7,9 @@ Type=simple
 User=verstak
 Group=verstak
 WorkingDirectory=/opt/verstak-sync-server
-ExecStart=/opt/verstak-sync-server/verstak-sync-server --port ${VERSTAK_PORT:-47732} --data /var/lib/verstak-sync-server
+Environment=VERSTAK_PORT=47732
+EnvironmentFile=-/etc/verstak-server/env
+ExecStart=/opt/verstak-sync-server/verstak-sync-server --port ${VERSTAK_PORT} --data /var/lib/verstak-sync-server
 Restart=on-failure
 RestartSec=5
 AmbientCapabilities=CAP_NET_BIND_SERVICE
