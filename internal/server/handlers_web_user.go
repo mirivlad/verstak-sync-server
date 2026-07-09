@@ -212,15 +212,17 @@ func (s *Server) handleUserWebReset(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "server.passwordsDoNotMatch"), "/reset?token="+token)))
 			return
 		}
-		var userID string
-		err := s.db.QueryRow("SELECT user_id FROM server_email_tokens WHERE token=? AND purpose='reset'", token).Scan(&userID)
-		if err != nil {
+		userID, err := s.resetPasswordWithToken(token, newPass)
+		if err == errResetTokenInvalid || err == errResetTokenExpired {
 			http.Redirect(w, r, "/forgot", http.StatusFound)
 			return
 		}
-		hash, _ := bcrypt.GenerateFromPassword([]byte(newPass), bcrypt.DefaultCost)
-		s.db.Exec("UPDATE server_users SET password_hash=? WHERE id=?", string(hash), userID)
-		s.db.Exec("DELETE FROM server_email_tokens WHERE token=?", token)
+		if err != nil {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "common.error"), "/forgot")))
+			return
+		}
 		log.Printf("reset: user %s reset password", userID)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(resetDoneHTML(locale)))

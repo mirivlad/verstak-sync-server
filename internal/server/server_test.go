@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -343,6 +345,33 @@ func TestDeviceRegisterRequiresValidVaultID(t *testing.T) {
 	}
 }
 
+func TestWebResetRejectsExpiredToken(t *testing.T) {
+	s, _ := newSyncHTTPServer(t)
+	defer s.Close()
+
+	oldPassword := "correct horse battery staple"
+	insertPairableUser(t, s, "user-a", "alice", oldPassword)
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := s.db.Exec(`INSERT INTO server_email_tokens
+		(token, user_id, purpose, expires_at, created_at)
+		VALUES (?, ?, 'reset', ?, ?)`, "expired-reset-token", "user-a", time.Now().Add(-time.Hour).UTC().Format(time.RFC3339), now); err != nil {
+		t.Fatalf("insert reset token: %v", err)
+	}
+
+	response := postWebReset(t, s, "expired-reset-token", "new secret password")
+	if response.Code != http.StatusFound || response.Header().Get("Location") != "/forgot" {
+		t.Fatalf("expired reset response status=%d location=%q, want 302 /forgot", response.Code, response.Header().Get("Location"))
+	}
+
+	var passwordHash string
+	if err := s.db.QueryRow("SELECT password_hash FROM server_users WHERE id=?", "user-a").Scan(&passwordHash); err != nil {
+		t.Fatalf("read password hash: %v", err)
+	}
+	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(oldPassword)) != nil {
+		t.Fatal("expired reset changed the password")
+	}
+}
+
 func TestNewServerMigratesLegacyOperationScope(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "legacy.db")
@@ -506,6 +535,20 @@ func pairSyncDevice(t *testing.T, serverURL, username, password, vaultID string)
 		id:    response["device_id"].(string),
 		token: response["device_token"].(string),
 	}
+}
+
+func postWebReset(t *testing.T, s *Server, token, password string) *httptest.ResponseRecorder {
+	t.Helper()
+	form := url.Values{
+		"token":    {token},
+		"password": {password},
+		"confirm":  {password},
+	}
+	request := httptest.NewRequest(http.MethodPost, "/reset", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	s.mux.ServeHTTP(response, request)
+	return response
 }
 
 func postJSON(t *testing.T, url, token string, body interface{}) map[string]interface{} {

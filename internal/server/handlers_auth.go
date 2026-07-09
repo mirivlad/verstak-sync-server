@@ -193,24 +193,18 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 400, err)
 		return
 	}
-	var userID, expiresAt string
-	err := s.db.QueryRow("SELECT user_id, expires_at FROM server_email_tokens WHERE token=? AND purpose='reset'",
-		req.Token).Scan(&userID, &expiresAt)
-	if err != nil {
+	_, err := s.resetPasswordWithToken(req.Token, req.NewPassword)
+	if err == errResetTokenInvalid {
 		jsonErr(w, 400, "invalid or expired token")
 		return
 	}
-	exp, err := time.Parse(time.RFC3339, expiresAt)
-	if err != nil || time.Now().After(exp) {
+	if err == errResetTokenExpired {
 		jsonErr(w, 400, "token expired")
 		return
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
 	if err != nil {
 		jsonErr(w, 500, "internal error")
 		return
 	}
-	s.db.Exec("UPDATE server_users SET password_hash=? WHERE id=?", string(hash), userID)
-	s.db.Exec("DELETE FROM server_email_tokens WHERE token=?", req.Token)
 	jsonOK(w, map[string]string{"status": "password reset"})
 }
