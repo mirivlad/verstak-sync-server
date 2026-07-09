@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"strings"
 	"time"
@@ -113,8 +114,8 @@ td{padding:0.5rem;border-bottom:1px solid #0f3460}a{color:#4ecca3}</style></head
 		if u["blocked"].(int) != 0 {
 			blocked = "🚫"
 		}
-		w.Write([]byte(`<tr><td>` + u["username"].(string) + `</td><td>` + u["email"].(string) +
-			`</td><td>` + confirmed + `</td><td>` + blocked + `</td><td>` + u["created_at"].(string) + `</td></tr>`))
+		w.Write([]byte(`<tr><td>` + html.EscapeString(u["username"].(string)) + `</td><td>` + html.EscapeString(u["email"].(string)) +
+			`</td><td>` + confirmed + `</td><td>` + blocked + `</td><td>` + html.EscapeString(u["created_at"].(string)) + `</td></tr>`))
 	}
 	w.Write([]byte(`</table></body></html>`))
 }
@@ -148,8 +149,8 @@ td{padding:0.5rem;border-bottom:1px solid #0f3460}a{color:#4ecca3}</style></head
 		if revokedAt == "" {
 			revokedAt = "-"
 		}
-		w.Write([]byte(`<tr><td>` + name + `</td><td style="font-family:monospace;font-size:0.8em">` + id +
-			`</td><td>` + clientVer + `</td><td>` + lastSeen + `</td><td>` + revokedAt + `</td><td>` + createdAt + `</td></tr>`))
+		w.Write([]byte(`<tr><td>` + html.EscapeString(name) + `</td><td style="font-family:monospace;font-size:0.8em">` + html.EscapeString(id) +
+			`</td><td>` + html.EscapeString(clientVer) + `</td><td>` + html.EscapeString(lastSeen) + `</td><td>` + html.EscapeString(revokedAt) + `</td><td>` + html.EscapeString(createdAt) + `</td></tr>`))
 	}
 	w.Write([]byte(`</table></body></html>`))
 }

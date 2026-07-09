@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -369,6 +370,74 @@ func TestWebResetRejectsExpiredToken(t *testing.T) {
 	}
 	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(oldPassword)) != nil {
 		t.Fatal("expired reset changed the password")
+	}
+}
+
+func TestServerRenderedPagesEscapeStoredValues(t *testing.T) {
+	s, _ := newSyncHTTPServer(t)
+	defer s.Close()
+
+	const maliciousText = `<img src=x onerror=alert(1)>`
+	const maliciousDeviceID = `device');alert(1);//`
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := s.db.Exec(`INSERT INTO server_users
+		(id, username, email, password_hash, confirmed, created_at)
+		VALUES (?, ?, ?, ?, 1, ?)`, "user-a", maliciousText, maliciousText+"@example.test", "unused", now); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO server_devices
+		(id, name, api_key, user_id, vault_id, client_version, last_seen, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, maliciousDeviceID, maliciousText, "device-key", "user-a", "vault-a", maliciousText, now, now); err != nil {
+		t.Fatalf("insert device: %v", err)
+	}
+	if _, err := s.db.Exec("INSERT INTO server_user_devices (user_id, device_id) VALUES (?, ?)", "user-a", maliciousDeviceID); err != nil {
+		t.Fatalf("link user device: %v", err)
+	}
+
+	tests := []struct {
+		name          string
+		path          string
+		cookie        *http.Cookie
+		containsDevID bool
+	}{
+		{
+			name:          "user dashboard",
+			path:          "/dashboard",
+			cookie:        &http.Cookie{Name: "user_session", Value: s.userTokens.Create("user-a")},
+			containsDevID: true,
+		},
+		{
+			name:   "admin users",
+			path:   "/admin/users",
+			cookie: &http.Cookie{Name: "admin_session", Value: s.tokens.Create()},
+		},
+		{
+			name:          "admin devices",
+			path:          "/admin/devices",
+			cookie:        &http.Cookie{Name: "admin_session", Value: s.tokens.Create()},
+			containsDevID: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			req.AddCookie(tt.cookie)
+			res := httptest.NewRecorder()
+			s.mux.ServeHTTP(res, req)
+			if res.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", res.Code)
+			}
+			body := res.Body.String()
+			if strings.Contains(body, maliciousText) {
+				t.Fatalf("page contains unescaped stored text: %s", body)
+			}
+			if !strings.Contains(body, html.EscapeString(maliciousText)) {
+				t.Fatalf("page does not contain escaped stored text: %s", body)
+			}
+			if tt.containsDevID && strings.Contains(body, maliciousDeviceID) {
+				t.Fatalf("page contains unescaped device ID: %s", body)
+			}
+		})
 	}
 }
 

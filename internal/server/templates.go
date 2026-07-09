@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"html"
 	"strings"
 )
 
@@ -552,6 +553,9 @@ button:hover{background:#4f46e5}
 }
 
 func errorPageHTML(locale, title, msg, backURL string) string {
+	title = html.EscapeString(title)
+	msg = html.EscapeString(msg)
+	backURL = html.EscapeString(backURL)
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="ru">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

@@ -4,8 +4,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -187,8 +190,8 @@ func (s *Server) handleUserWebReset(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		html := strings.ReplaceAll(resetPasswordHTML(locale), "{TOKEN}", token)
-		w.Write([]byte(html))
+		page := strings.ReplaceAll(resetPasswordHTML(locale), "{TOKEN}", html.EscapeString(token))
+		w.Write([]byte(page))
 	case "POST":
 		if err := r.ParseForm(); err != nil {
 			jsonErr(w, 400, "bad form")
@@ -204,12 +207,12 @@ func (s *Server) handleUserWebReset(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := validatePassword(newPass); err != "" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), string(err), "/reset?token="+token)))
+			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), string(err), "/reset?token="+url.QueryEscape(token))))
 			return
 		}
 		if newPass != confirm {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "server.passwordsDoNotMatch"), "/reset?token="+token)))
+			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "server.passwordsDoNotMatch"), "/reset?token="+url.QueryEscape(token))))
 			return
 		}
 		userID, err := s.resetPasswordWithToken(token, newPass)
@@ -310,7 +313,7 @@ func (s *Server) handleUserDashboard(w http.ResponseWriter, r *http.Request) {
 				created = created[:10]
 			}
 			status := "<span style='color:#34d399'>" + t(locale, "userDashboard.active") + "</span>"
-			revokeBtn := fmt.Sprintf(`<button class="btn btn-danger btn-sm" onclick="revokeDevice('%s')">%s</button>`, d.ID, t(locale, "userDashboard.revoke"))
+			revokeBtn := fmt.Sprintf(`<button class="btn btn-danger btn-sm" onclick="revokeDevice(%s)">%s</button>`, html.EscapeString(strconv.Quote(d.ID)), t(locale, "userDashboard.revoke"))
 			if d.RevokedAt != "" {
 				status = "<span style='color:#ff6b6b'>" + t(locale, "userDashboard.revoked") + "</span>"
 				revokeBtn = ""
@@ -321,11 +324,11 @@ func (s *Server) handleUserDashboard(w http.ResponseWriter, r *http.Request) {
 				<td>%s</td>
 				<td>%s</td>
 				<td>%s %s</td>
-			</tr>`, d.Name, status, created, ls, d.ClientVer, revokeBtn)
+			</tr>`, html.EscapeString(d.Name), status, html.EscapeString(created), html.EscapeString(ls), html.EscapeString(d.ClientVer), revokeBtn)
 		}
 	}
 
-	w.Write([]byte(userDashboardHTML(locale, username, deviceRows)))
+	w.Write([]byte(userDashboardHTML(locale, html.EscapeString(username), deviceRows)))
 }
 
 func (s *Server) handleUserWebLogout(w http.ResponseWriter, r *http.Request) {
