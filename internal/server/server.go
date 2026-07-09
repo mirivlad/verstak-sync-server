@@ -139,6 +139,10 @@ func NewServer(dbPath, dataDir string, cfg *Config) (*Server, error) {
 			return nil, fmt.Errorf("schema: %w", err)
 		}
 	}
+	if err := migrateServerSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
 
 	blobsDir := filepath.Join(dataDir, "blobs")
 	if err := os.MkdirAll(blobsDir, 0750); err != nil {

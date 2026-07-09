@@ -18,16 +18,16 @@ migrated into a deterministic legacy scope.
 **Files:**
 - Modify: `internal/server/server_test.go`
 
-- [ ] Add helpers that create confirmed users and token-authenticated devices
+- [x] Add helpers that create confirmed users and token-authenticated devices
   with a specified vault ID.
-- [ ] Add a failing test where separate users push and pull from the same
+- [x] Add a failing test where separate users push and pull from the same
   vault ID; each pull must contain only its own operation and cursor.
-- [ ] Add a failing test where one user owns devices in two vaults; pulls must
+- [x] Add a failing test where one user owns devices in two vaults; pulls must
   remain vault-local.
-- [ ] Add a failing test that sends another device's ID in `push`; assert the
+- [x] Add a failing test that sends another device's ID in `push`; assert the
   stored and returned operation uses the authenticated device ID.
-- [ ] Add a failing test for identical idempotency keys in different scopes.
-- [ ] Run: `go test ./internal/server -run 'TestSync.*Isolation|TestSyncPush'`
+- [x] Add a failing test for identical idempotency keys in different scopes.
+- [x] Run: `go test ./internal/server -run 'TestSync.*Isolation|TestSyncPush'`
   and confirm the new assertions fail for the intended missing behaviour.
 
 ## Task 2: Add idempotent SQLite scope migration
@@ -37,15 +37,15 @@ migrated into a deterministic legacy scope.
 - Modify: `internal/server/server.go`
 - Test: `internal/server/server_test.go`
 
-- [ ] Define `vault_id` on new devices and `user_id`/`vault_id` on new
+- [x] Define `vault_id` on new devices and `user_id`/`vault_id` on new
   operations; define scoped tombstone and idempotency primary keys.
-- [ ] Add startup migration helpers that inspect columns, add compatible
+- [x] Add startup migration helpers that inspect columns, add compatible
   columns, backfill owner IDs, assign `legacy:<user_id>` to old scopes, and
   rebuild the two tables whose primary keys change.
-- [ ] Add a failing legacy-schema fixture test, then make it pass by opening
+- [x] Add a failing legacy-schema fixture test, then make it pass by opening
   the database through `NewServer` and asserting its operation has the
   expected owner and legacy scope.
-- [ ] Run: `go test ./internal/server -run 'Test.*Migration|TestSync.*'`.
+- [x] Run: `go test ./internal/server -run 'Test.*Migration|TestSync.*'`.
 
 ## Task 3: Apply authenticated scope to sync handlers
 
@@ -54,15 +54,15 @@ migrated into a deterministic legacy scope.
 - Modify: `internal/server/handlers_api.go`
 - Test: `internal/server/server_test.go`
 
-- [ ] Extend authenticated device lookup to provide the effective vault scope;
+- [x] Extend authenticated device lookup to provide the effective vault scope;
   missing user ownership must not authorize sync operations.
-- [ ] Require `vault_id` when creating a new client pairing and store it with
+- [x] Require `vault_id` when creating a new client pairing and store it with
   the device.
-- [ ] Make push use authenticated device/user/vault values for inserts,
+- [x] Make push use authenticated device/user/vault values for inserts,
   conflicts, revisions, tombstones, and idempotency lookup/storage.
-- [ ] Make pull filter operations and its reported cursor by authenticated
+- [x] Make pull filter operations and its reported cursor by authenticated
   user/vault.
-- [ ] Run the focused tests from Task 1 until green, then
+- [x] Run the focused tests from Task 1 until green, then
   `go test ./internal/server`.
 
 ## Task 4: Send the current vault ID while pairing
@@ -73,13 +73,17 @@ migrated into a deterministic legacy scope.
 - Modify: `../verstak-desktop/internal/api/app.go`
 - Modify: `../verstak-desktop/internal/api/app_test.go`
 
-- [ ] Add `vault_id` to the pair request and expose it in the pairing client
+- [x] Add `vault_id` to the pair request and expose it in the pairing client
   method without changing push/pull wire compatibility.
-- [ ] Read the open vault metadata in `syncConfigure`; reject configuration if
+- [x] Read the open vault metadata in `syncConfigure`; reject configuration if
   the vault ID is absent.
-- [ ] Add a failing client/API test that captures the pair request and asserts
+- [x] Add a failing client/API test that captures the pair request and asserts
   the persistent vault ID is sent.
-- [ ] Run: `go test ./internal/core/sync ./internal/api`.
+- [x] Rebind desktop sync state, cursor, and persisted device identity whenever
+  a vault is created, opened, or switched.
+- [x] Hydrate missing legacy vault device IDs from the authenticated sync
+  server before a token-based sync can use a global fallback.
+- [x] Run: `go test ./internal/core/sync ./internal/api`.
 
 ## Task 5: Document, verify, and publish
 
@@ -87,9 +91,9 @@ migrated into a deterministic legacy scope.
 - Modify: `README.md`
 - Modify: `docs/superpowers/specs/2026-07-10-sync-tenant-isolation-design.md`
 
-- [ ] Document that pairing is vault-bound and that sync cursors are scoped.
-- [ ] Run `gofmt` on all changed Go files.
-- [ ] Run `go test ./...` in both `verstak-sync-server` and
+- [x] Document that pairing is vault-bound and that sync cursors are scoped.
+- [x] Run `gofmt` on all changed Go files.
+- [x] Run `go test ./...` in both `verstak-sync-server` and
   `verstak-desktop`, then `git diff --check` in both repositories.
-- [ ] Commit and push the sync-server and desktop changes as coordinated
+- [x] Commit and push the sync-server and desktop changes as coordinated
   security commits.

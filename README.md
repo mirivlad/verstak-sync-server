@@ -7,7 +7,7 @@ Standalone sync server for Verstak2 platform.
 This server provides synchronization between devices running Verstak2. It handles:
 
 - Device registration and authentication
-- Operation log sync with server sequence numbers and conflict detection
+- Vault-scoped operation log sync with server sequence numbers and conflict detection
 - Blob storage for attachments
 - User management with email confirmation
 
@@ -139,7 +139,7 @@ internal/server/     - Server implementation
 
 Desktop sync client:
 
-- `POST /api/client/pair` - Pair a desktop client with username/password and return a device token
+- `POST /api/client/pair` - Pair a desktop client with username/password and its persistent `vault_id`, then return a device token
 - `POST /api/auth/test` - Validate username/password from the desktop client
 - `GET /api/client/me` - Return current authenticated client/device details
 - `POST /api/client/revoke-current` - Revoke the current desktop device token
@@ -165,8 +165,15 @@ Operational endpoints:
 - `/register`, `/login`, `/dashboard`, `/forgot`, `/reset`, `/logout` - User web UI
 
 Sync operations are generic records with `entity_type`, `entity_id`, `op_type`,
-`payload_json`, `device_id`, and sequencing metadata. The server stores and
-orders operations; Verstak desktop owns the v2 payload semantics.
+`payload_json`, `device_id`, and sequencing metadata. A pairing token is bound
+to one user and vault. The server derives the stored device ID and operation
+scope from that token, ignores a caller-supplied `device_id` for authorization,
+and returns only operations and cursors from the authenticated user/vault.
+Verstak desktop owns the v2 payload semantics.
+
+New device enrollment requires a non-empty `vault_id`. The `legacy:` prefix is
+reserved for server-side migration of older records and cannot be selected by
+new clients.
 
 ## Development
 

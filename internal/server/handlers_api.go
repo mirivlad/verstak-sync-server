@@ -50,6 +50,7 @@ func (s *Server) handleClientPair(w http.ResponseWriter, r *http.Request) {
 		Password      string `json:"password"`
 		DeviceName    string `json:"device_name"`
 		ClientVersion string `json:"client_version"`
+		VaultID       string `json:"vault_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, 400, "bad json")
@@ -57,6 +58,15 @@ func (s *Server) handleClientPair(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Login == "" || req.Password == "" {
 		jsonErr(w, 400, "login and password required")
+		return
+	}
+	req.VaultID = strings.TrimSpace(req.VaultID)
+	if req.VaultID == "" {
+		jsonErr(w, 400, "vault_id required")
+		return
+	}
+	if strings.HasPrefix(req.VaultID, "legacy:") {
+		jsonErr(w, 400, "vault_id uses reserved prefix")
 		return
 	}
 	if req.DeviceName == "" {
@@ -95,10 +105,10 @@ func (s *Server) handleClientPair(w http.ResponseWriter, r *http.Request) {
 	apiKey := make([]byte, 20)
 	rand.Read(apiKey)
 	_, err = s.db.Exec(`INSERT INTO server_devices
-		(id, name, api_key, token_hash, token_prefix, token_suffix, user_id, client_version, last_ip, last_seen, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, name, api_key, token_hash, token_prefix, token_suffix, user_id, vault_id, client_version, last_ip, last_seen, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		deviceID, req.DeviceName, hex.EncodeToString(apiKey), tokenHash, prefix, suffix,
-		userID, req.ClientVersion, ip, now, now)
+		userID, req.VaultID, req.ClientVersion, ip, now, now)
 	if err != nil {
 		jsonErr(w, 500, err.Error())
 		return
@@ -272,6 +282,7 @@ func (s *Server) handleDeviceRegister(w http.ResponseWriter, r *http.Request) {
 		Name     string `json:"name"`
 		Username string `json:"username"`
 		Password string `json:"password"`
+		VaultID  string `json:"vault_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErr(w, 400, "invalid JSON")
@@ -283,6 +294,15 @@ func (s *Server) handleDeviceRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Username == "" || req.Password == "" {
 		jsonErr(w, 401, "username and password required")
+		return
+	}
+	req.VaultID = strings.TrimSpace(req.VaultID)
+	if req.VaultID == "" {
+		jsonErr(w, 400, "vault_id required")
+		return
+	}
+	if strings.HasPrefix(req.VaultID, "legacy:") {
+		jsonErr(w, 400, "vault_id uses reserved prefix")
 		return
 	}
 	var userID, hash string
@@ -311,8 +331,8 @@ func (s *Server) handleDeviceRegister(w http.ResponseWriter, r *http.Request) {
 	deviceID := apiKey[:12]
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err = s.db.Exec(
-		"INSERT INTO server_devices (id, name, api_key, last_seen, created_at) VALUES (?, ?, ?, ?, ?)",
-		deviceID, req.Name, apiKey, now, now,
+		"INSERT INTO server_devices (id, name, api_key, user_id, vault_id, last_seen, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		deviceID, req.Name, apiKey, userID, req.VaultID, now, now,
 	)
 	if err != nil {
 		jsonErr(w, 500, err.Error())
@@ -326,7 +346,7 @@ func (s *Server) handleDeviceRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
-	_, _, ok := s.requireAuth(w, r)
+	scope, ok := s.requireSyncScope(w, r)
 	if !ok {
 		return
 	}
@@ -354,7 +374,9 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.IdempotencyKey != "" {
 		var cachedJSON string
-		err := s.db.QueryRow("SELECT response_json FROM server_idempotency_keys WHERE idempotency_key=?", req.IdempotencyKey).Scan(&cachedJSON)
+		err := s.db.QueryRow(`SELECT response_json FROM server_idempotency_keys
+			WHERE user_id=? AND vault_id=? AND idempotency_key=?`,
+			scope.UserID, scope.VaultID, req.IdempotencyKey).Scan(&cachedJSON)
 		if err == nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(cachedJSON))
@@ -371,9 +393,9 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 		if op.LastSeenServerSeq > 0 {
 			conflictRows, err := s.db.Query(`
 				SELECT op_id, device_id, op_type, server_sequence FROM server_ops
-				WHERE entity_type=? AND entity_id=? AND device_id!=?
+				WHERE user_id=? AND vault_id=? AND entity_type=? AND entity_id=? AND device_id!=?
 				  AND server_sequence > ? AND op_type != 'delete'
-				ORDER BY server_sequence`, op.EntityType, op.EntityID, req.DeviceID, op.LastSeenServerSeq)
+				ORDER BY server_sequence`, scope.UserID, scope.VaultID, op.EntityType, op.EntityID, scope.DeviceID, op.LastSeenServerSeq)
 			if err == nil {
 				for conflictRows.Next() {
 					var cOpID, cDevID, cOpType string
@@ -392,9 +414,9 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		res, err := s.db.Exec(
-			`INSERT OR IGNORE INTO server_ops (op_id, server_sequence, device_id, entity_type, entity_id, op_type, payload_json, idempotency_key, client_sequence, last_seen_server_seq, created_at, pushed_at)
-			 VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			op.OpID, req.DeviceID, op.EntityType, op.EntityID, op.OpType, op.PayloadJSON,
+			`INSERT OR IGNORE INTO server_ops (op_id, server_sequence, user_id, vault_id, device_id, entity_type, entity_id, op_type, payload_json, idempotency_key, client_sequence, last_seen_server_seq, created_at, pushed_at)
+			 VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			op.OpID, scope.UserID, scope.VaultID, scope.DeviceID, op.EntityType, op.EntityID, op.OpType, op.PayloadJSON,
 			req.IdempotencyKey, op.ClientSequence, op.LastSeenServerSeq, op.CreatedAt, now,
 		)
 		if err != nil {
@@ -404,15 +426,16 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 		if n == 0 {
 			continue
 		}
-		seqRes, err := s.db.Exec("INSERT INTO server_revisions (op_id, device_id) VALUES (?, ?)", op.OpID, req.DeviceID)
+		seqRes, err := s.db.Exec("INSERT INTO server_revisions (op_id, device_id) VALUES (?, ?)", op.OpID, scope.DeviceID)
 		if err != nil {
 			continue
 		}
 		seq, _ := seqRes.LastInsertId()
 		s.db.Exec("UPDATE server_ops SET server_sequence=? WHERE op_id=?", seq, op.OpID)
 		if op.OpType == "delete" {
-			s.db.Exec(`INSERT OR REPLACE INTO server_tombstones (entity_type, entity_id, op_id, deleted_at) VALUES (?, ?, ?, ?)`,
-				op.EntityType, op.EntityID, op.OpID, now)
+			s.db.Exec(`INSERT OR REPLACE INTO server_tombstones
+				(user_id, vault_id, entity_type, entity_id, op_id, deleted_at) VALUES (?, ?, ?, ?, ?, ?)`,
+				scope.UserID, scope.VaultID, op.EntityType, op.EntityID, op.OpID, now)
 		}
 		accepted = append(accepted, op.OpID)
 	}
@@ -423,15 +446,16 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.IdempotencyKey != "" {
 		if respJSON, err := json.Marshal(resp); err == nil {
-			s.db.Exec("INSERT OR IGNORE INTO server_idempotency_keys (idempotency_key, response_json, created_at) VALUES (?, ?, ?)",
-				req.IdempotencyKey, string(respJSON), now)
+			s.db.Exec(`INSERT OR IGNORE INTO server_idempotency_keys
+				(user_id, vault_id, idempotency_key, response_json, created_at) VALUES (?, ?, ?, ?, ?)`,
+				scope.UserID, scope.VaultID, req.IdempotencyKey, string(respJSON), now)
 		}
 	}
 	jsonOK(w, resp)
 }
 
 func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
-	_, _, ok := s.requireAuth(w, r)
+	scope, ok := s.requireSyncScope(w, r)
 	if !ok {
 		return
 	}
@@ -447,12 +471,13 @@ func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var serverSeq int
-	s.db.QueryRow("SELECT COALESCE(MAX(server_sequence), 0) FROM server_ops").Scan(&serverSeq)
+	s.db.QueryRow(`SELECT COALESCE(MAX(server_sequence), 0) FROM server_ops
+		WHERE user_id=? AND vault_id=?`, scope.UserID, scope.VaultID).Scan(&serverSeq)
 	rows, err := s.db.Query(`
 		SELECT op_id, server_sequence, device_id, entity_type, entity_id, op_type, payload_json, created_at
 		FROM server_ops
-		WHERE server_sequence > ? AND server_sequence IS NOT NULL
-		ORDER BY server_sequence`, req.SinceSequence)
+		WHERE user_id=? AND vault_id=? AND server_sequence > ? AND server_sequence IS NOT NULL
+		ORDER BY server_sequence`, scope.UserID, scope.VaultID, req.SinceSequence)
 	if err != nil {
 		jsonErr(w, 500, err.Error())
 		return

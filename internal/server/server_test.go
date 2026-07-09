@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestNewServer(t *testing.T) {
@@ -67,10 +70,11 @@ func TestSyncPushPullStoresSequencedOps(t *testing.T) {
 	defer s.Close()
 	s.SetupRoutes()
 
+	insertSyncUser(t, s, "user-a")
 	now := time.Now().UTC().Format(time.RFC3339)
 	if _, err := s.db.Exec(
-		"INSERT INTO server_devices (id, name, api_key, last_seen, created_at) VALUES (?, ?, ?, ?, ?)",
-		"device-a", "Device A", "api-key", now, now,
+		"INSERT INTO server_devices (id, name, api_key, user_id, vault_id, last_seen, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"device-a", "Device A", "api-key", "user-a", "vault-a", now, now,
 	); err != nil {
 		t.Fatalf("insert device: %v", err)
 	}
@@ -164,6 +168,343 @@ func TestRevokedLegacyAPIKeyCannotPushOrPull(t *testing.T) {
 	})
 	if pullStatus != http.StatusUnauthorized || pullResp["error"] != "device revoked" {
 		t.Fatalf("pull status=%d resp=%#v, want 401 device revoked", pullStatus, pullResp)
+	}
+}
+
+func TestSyncPullDoesNotExposeOtherUserOperations(t *testing.T) {
+	s, ts := newSyncHTTPServer(t)
+	defer s.Close()
+	defer ts.Close()
+
+	insertSyncUser(t, s, "user-a")
+	insertSyncUser(t, s, "user-b")
+	insertSyncDevice(t, s, "device-a", "user-a", "token-a")
+	insertSyncDevice(t, s, "device-b", "user-b", "token-b")
+
+	postJSON(t, ts.URL+"/api/v1/sync/push", "token-a", syncPushBody("device-a", "op-user-a", ""))
+
+	pull := postJSON(t, ts.URL+"/api/v1/sync/pull", "token-b", map[string]interface{}{
+		"since_sequence": 0,
+	})
+	if got := len(pull["ops"].([]interface{})); got != 0 {
+		t.Fatalf("other user pulled %d operation(s), want 0: %#v", got, pull)
+	}
+	if got := int(pull["server_sequence"].(float64)); got != 0 {
+		t.Fatalf("other user cursor = %d, want 0: %#v", got, pull)
+	}
+}
+
+func TestSyncPushUsesAuthenticatedDeviceIdentity(t *testing.T) {
+	s, ts := newSyncHTTPServer(t)
+	defer s.Close()
+	defer ts.Close()
+
+	insertSyncUser(t, s, "user-a")
+	insertSyncUser(t, s, "user-b")
+	insertSyncDevice(t, s, "device-authenticated", "user-a", "token-a")
+	insertSyncDevice(t, s, "device-forged", "user-b", "token-b")
+
+	postJSON(t, ts.URL+"/api/v1/sync/push", "token-a", syncPushBody("device-forged", "op-auth-device", ""))
+
+	var storedDeviceID string
+	if err := s.db.QueryRow("SELECT device_id FROM server_ops WHERE op_id=?", "op-auth-device").Scan(&storedDeviceID); err != nil {
+		t.Fatalf("read stored operation: %v", err)
+	}
+	if storedDeviceID != "device-authenticated" {
+		t.Fatalf("stored device = %q, want authenticated device", storedDeviceID)
+	}
+}
+
+func TestSyncPushScopesIdempotencyResponsesByUser(t *testing.T) {
+	s, ts := newSyncHTTPServer(t)
+	defer s.Close()
+	defer ts.Close()
+
+	insertSyncUser(t, s, "user-a")
+	insertSyncUser(t, s, "user-b")
+	insertSyncDevice(t, s, "device-a", "user-a", "token-a")
+	insertSyncDevice(t, s, "device-b", "user-b", "token-b")
+
+	postJSON(t, ts.URL+"/api/v1/sync/push", "token-a", syncPushBody("device-a", "op-user-a", "same-key"))
+	response := postJSON(t, ts.URL+"/api/v1/sync/push", "token-b", syncPushBody("device-b", "op-user-b", "same-key"))
+
+	accepted := response["accepted"].([]interface{})
+	if len(accepted) != 1 || accepted[0] != "op-user-b" {
+		t.Fatalf("user-b received idempotency response %#v, want only op-user-b", response)
+	}
+}
+
+func TestSyncPushDoesNotReportOtherTenantConflicts(t *testing.T) {
+	s, ts := newSyncHTTPServer(t)
+	defer s.Close()
+	defer ts.Close()
+
+	insertSyncUser(t, s, "user-a")
+	insertSyncUser(t, s, "user-b")
+	insertSyncDevice(t, s, "device-a", "user-a", "token-a")
+	insertSyncDevice(t, s, "device-b", "user-b", "token-b")
+
+	postJSON(t, ts.URL+"/api/v1/sync/push", "token-a", syncPushBody("device-a", "op-user-a-1", ""))
+	postJSON(t, ts.URL+"/api/v1/sync/push", "token-a", syncPushBody("device-a", "op-user-a-2", ""))
+
+	body := syncPushBody("device-b", "op-user-b", "")
+	body["ops"].([]map[string]interface{})[0]["last_seen_server_seq"] = 1
+	response := postJSON(t, ts.URL+"/api/v1/sync/push", "token-b", body)
+	if response["conflicts"] != nil {
+		t.Fatalf("other tenant conflict leaked into response: %#v", response)
+	}
+}
+
+func TestSyncPullDoesNotExposeOtherVaultOperations(t *testing.T) {
+	s, ts := newSyncHTTPServer(t)
+	defer s.Close()
+	defer ts.Close()
+
+	password := "correct horse battery staple"
+	insertPairableUser(t, s, "user-a", "alice", password)
+
+	deviceA := pairSyncDevice(t, ts.URL, "alice", password, "vault-a")
+	deviceB := pairSyncDevice(t, ts.URL, "alice", password, "vault-b")
+
+	postJSON(t, ts.URL+"/api/v1/sync/push", deviceA.token, syncPushBody(deviceA.id, "op-vault-a", ""))
+	postJSON(t, ts.URL+"/api/v1/sync/push", deviceB.token, syncPushBody(deviceB.id, "op-vault-b", ""))
+
+	pull := postJSON(t, ts.URL+"/api/v1/sync/pull", deviceA.token, map[string]interface{}{
+		"since_sequence": 0,
+	})
+	ops := pull["ops"].([]interface{})
+	if len(ops) != 1 || ops[0].(map[string]interface{})["op_id"] != "op-vault-a" {
+		t.Fatalf("vault-a pulled %#v, want only op-vault-a", pull)
+	}
+}
+
+func TestClientPairRequiresVaultID(t *testing.T) {
+	s, ts := newSyncHTTPServer(t)
+	defer s.Close()
+	defer ts.Close()
+
+	password := "correct horse battery staple"
+	insertPairableUser(t, s, "user-a", "alice", password)
+
+	status, response := postJSONStatus(t, ts.URL+"/api/client/pair", "", map[string]interface{}{
+		"login":       "alice",
+		"password":    password,
+		"device_name": "Desktop",
+	})
+	if status != http.StatusBadRequest || response["error"] != "vault_id required" {
+		t.Fatalf("pair without vault ID status=%d response=%#v, want 400 vault_id required", status, response)
+	}
+}
+
+func TestClientPairRejectsReservedLegacyVaultID(t *testing.T) {
+	s, ts := newSyncHTTPServer(t)
+	defer s.Close()
+	defer ts.Close()
+
+	password := "correct horse battery staple"
+	insertPairableUser(t, s, "user-a", "alice", password)
+
+	status, response := postJSONStatus(t, ts.URL+"/api/client/pair", "", map[string]interface{}{
+		"login":       "alice",
+		"password":    password,
+		"device_name": "Desktop",
+		"vault_id":    "legacy:user-a",
+	})
+	if status != http.StatusBadRequest || response["error"] != "vault_id uses reserved prefix" {
+		t.Fatalf("pair with reserved vault ID status=%d response=%#v, want 400 reserved prefix", status, response)
+	}
+}
+
+func TestDeviceRegisterRequiresValidVaultID(t *testing.T) {
+	s, ts := newSyncHTTPServer(t)
+	defer s.Close()
+	defer ts.Close()
+
+	password := "correct horse battery staple"
+	insertPairableUser(t, s, "user-a", "alice", password)
+
+	status, response := postJSONStatus(t, ts.URL+"/api/v1/device/register", "", map[string]interface{}{
+		"name":     "Desktop",
+		"username": "alice",
+		"password": password,
+	})
+	if status != http.StatusBadRequest || response["error"] != "vault_id required" {
+		t.Fatalf("register without vault ID status=%d response=%#v, want 400 vault_id required", status, response)
+	}
+
+	status, response = postJSONStatus(t, ts.URL+"/api/v1/device/register", "", map[string]interface{}{
+		"name":     "Desktop",
+		"username": "alice",
+		"password": password,
+		"vault_id": "legacy:user-a",
+	})
+	if status != http.StatusBadRequest || response["error"] != "vault_id uses reserved prefix" {
+		t.Fatalf("register with reserved vault ID status=%d response=%#v, want 400 reserved prefix", status, response)
+	}
+}
+
+func TestNewServerMigratesLegacyOperationScope(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "legacy.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+
+	legacySchema := []string{
+		`CREATE TABLE server_devices (
+			id TEXT PRIMARY KEY, name TEXT NOT NULL, api_key TEXT NOT NULL UNIQUE,
+			token_hash TEXT, token_prefix TEXT, token_suffix TEXT, user_id TEXT,
+			client_version TEXT, last_ip TEXT, last_seen TEXT, revoked_at TEXT,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE server_user_devices (
+			user_id TEXT NOT NULL, device_id TEXT NOT NULL,
+			PRIMARY KEY (user_id, device_id)
+		)`,
+		`CREATE TABLE server_ops (
+			op_id TEXT PRIMARY KEY, server_sequence INTEGER, device_id TEXT NOT NULL,
+			entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, op_type TEXT NOT NULL,
+			payload_json TEXT NOT NULL, idempotency_key TEXT, client_sequence INTEGER DEFAULT 0,
+			last_seen_server_seq INTEGER DEFAULT 0, created_at TEXT NOT NULL,
+			pushed_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE server_tombstones (
+			entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, op_id TEXT NOT NULL,
+			deleted_at TEXT NOT NULL, PRIMARY KEY (entity_type, entity_id)
+		)`,
+		`CREATE TABLE server_idempotency_keys (
+			idempotency_key TEXT PRIMARY KEY, response_json TEXT NOT NULL, created_at TEXT NOT NULL
+		)`,
+	}
+	for _, stmt := range legacySchema {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("create legacy schema: %v", err)
+		}
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.Exec(`INSERT INTO server_devices (id, name, api_key, last_seen, created_at)
+		VALUES (?, ?, ?, ?, ?)`, "legacy-device", "Legacy", "legacy-key", now, now); err != nil {
+		t.Fatalf("insert legacy device: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO server_user_devices (user_id, device_id) VALUES (?, ?)`, "legacy-user", "legacy-device"); err != nil {
+		t.Fatalf("insert legacy device owner: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO server_ops
+		(op_id, server_sequence, device_id, entity_type, entity_id, op_type, payload_json, created_at, pushed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, "legacy-op", 1, "legacy-device", "file", "Docs/one.txt", "create", `{}`, now, now); err != nil {
+		t.Fatalf("insert legacy operation: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	s, err := NewServer(dbPath, filepath.Join(dir, "data"), &Config{Port: 47732})
+	if err != nil {
+		t.Fatalf("NewServer migration: %v", err)
+	}
+	assertLegacyOperationScope(t, s)
+	if err := s.Close(); err != nil {
+		t.Fatalf("close migrated db: %v", err)
+	}
+
+	s, err = NewServer(dbPath, filepath.Join(dir, "data"), &Config{Port: 47732})
+	if err != nil {
+		t.Fatalf("NewServer repeated migration: %v", err)
+	}
+	defer s.Close()
+	assertLegacyOperationScope(t, s)
+}
+
+func assertLegacyOperationScope(t *testing.T, s *Server) {
+	t.Helper()
+	var userID, vaultID string
+	if err := s.db.QueryRow("SELECT user_id, vault_id FROM server_ops WHERE op_id=?", "legacy-op").Scan(&userID, &vaultID); err != nil {
+		t.Fatalf("read migrated operation: %v", err)
+	}
+	if userID != "legacy-user" || vaultID != "legacy:legacy-user" {
+		t.Fatalf("migrated scope = %q/%q, want legacy-user/legacy:legacy-user", userID, vaultID)
+	}
+}
+
+func newSyncHTTPServer(t *testing.T) (*Server, *httptest.Server) {
+	t.Helper()
+	dir := t.TempDir()
+	s, err := NewServer(filepath.Join(dir, "test.db"), filepath.Join(dir, "data"), &Config{Port: 47732})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	s.SetupRoutes()
+	return s, httptest.NewServer(s.mux)
+}
+
+func insertSyncUser(t *testing.T, s *Server, userID string) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := s.db.Exec(`INSERT INTO server_users
+		(id, username, email, password_hash, confirmed, created_at)
+		VALUES (?, ?, ?, ?, 1, ?)`, userID, userID, userID+"@example.test", "unused", now); err != nil {
+		t.Fatalf("insert sync user %s: %v", userID, err)
+	}
+}
+
+func insertPairableUser(t *testing.T, s *Server, userID, username, password string) {
+	t.Helper()
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := s.db.Exec(`INSERT INTO server_users
+		(id, username, email, password_hash, confirmed, created_at)
+		VALUES (?, ?, ?, ?, 1, ?)`, userID, username, username+"@example.test", string(passwordHash), now); err != nil {
+		t.Fatalf("insert pairable user: %v", err)
+	}
+}
+
+func insertSyncDevice(t *testing.T, s *Server, deviceID, userID, token string) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := s.db.Exec(`INSERT INTO server_devices
+		(id, name, api_key, token_hash, user_id, last_seen, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, deviceID, deviceID, "legacy-"+deviceID, sha256Hex(token), userID, now, now); err != nil {
+		t.Fatalf("insert sync device %s: %v", deviceID, err)
+	}
+}
+
+func syncPushBody(deviceID, opID, idempotencyKey string) map[string]interface{} {
+	return map[string]interface{}{
+		"device_id":       deviceID,
+		"idempotency_key": idempotencyKey,
+		"ops": []map[string]interface{}{
+			{
+				"op_id":        opID,
+				"entity_type":  "file",
+				"entity_id":    "Docs/one.txt",
+				"op_type":      "create",
+				"payload_json": `{"path":"Docs/one.txt","content":"hello"}`,
+				"created_at":   "2026-07-10T00:00:00Z",
+			},
+		},
+	}
+}
+
+type pairedSyncDevice struct {
+	id    string
+	token string
+}
+
+func pairSyncDevice(t *testing.T, serverURL, username, password, vaultID string) pairedSyncDevice {
+	t.Helper()
+	response := postJSON(t, serverURL+"/api/client/pair", "", map[string]interface{}{
+		"login":       username,
+		"password":    password,
+		"device_name": "Desktop " + vaultID,
+		"vault_id":    vaultID,
+	})
+	return pairedSyncDevice{
+		id:    response["device_id"].(string),
+		token: response["device_token"].(string),
 	}
 }
 

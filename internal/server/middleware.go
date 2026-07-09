@@ -7,7 +7,38 @@ import (
 	"time"
 )
 
+type authenticatedDevice struct {
+	DeviceID string
+	UserID   string
+	VaultID  string
+}
+
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) (deviceID, userID string, ok bool) {
+	device, ok := s.authenticateDevice(w, r)
+	if !ok {
+		return "", "", false
+	}
+	return device.DeviceID, device.UserID, true
+}
+
+func (s *Server) requireSyncScope(w http.ResponseWriter, r *http.Request) (authenticatedDevice, bool) {
+	device, ok := s.authenticateDevice(w, r)
+	if !ok {
+		return authenticatedDevice{}, false
+	}
+	if device.UserID == "" {
+		jsonErr(w, http.StatusForbidden, "device is not associated with a user")
+		return authenticatedDevice{}, false
+	}
+	device.VaultID = effectiveVaultScope(device.UserID, device.VaultID)
+	if device.VaultID == "" {
+		jsonErr(w, http.StatusForbidden, "device is not associated with a vault")
+		return authenticatedDevice{}, false
+	}
+	return device, true
+}
+
+func (s *Server) authenticateDevice(w http.ResponseWriter, r *http.Request) (authenticatedDevice, bool) {
 	key := r.Header.Get("Authorization")
 	key = strings.TrimPrefix(key, "Bearer ")
 	if key == "" {
@@ -15,46 +46,43 @@ func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) (deviceID, 
 	}
 	if key == "" {
 		jsonErr(w, 401, "API key required")
-		return "", "", false
+		return authenticatedDevice{}, false
 	}
-	hash := sha256Hex(key)
-	var deviceIDVal, userIDVal, revokedAt sql.NullString
-	err := s.db.QueryRow("SELECT id, user_id, revoked_at FROM server_devices WHERE token_hash=?", hash).Scan(&deviceIDVal, &userIDVal, &revokedAt)
-	if err == nil {
-		if revokedAt.Valid && revokedAt.String != "" {
-			jsonErr(w, 401, "device revoked")
-			return "", "", false
-		}
-		if userIDVal.Valid && userIDVal.String != "" {
-			var blocked int
-			s.db.QueryRow("SELECT blocked FROM server_users WHERE id=?", userIDVal.String).Scan(&blocked)
-			if blocked != 0 {
-				jsonErr(w, 403, "user blocked")
-				return "", "", false
-			}
-		}
-		s.db.Exec("UPDATE server_devices SET last_seen=? WHERE id=?", time.Now().UTC().Format(time.RFC3339), deviceIDVal.String)
-		return deviceIDVal.String, userIDVal.String, true
+
+	var device authenticatedDevice
+	var userID, vaultID, revokedAt sql.NullString
+	err := s.db.QueryRow(`SELECT id, user_id, vault_id, revoked_at
+		FROM server_devices WHERE token_hash=?`, sha256Hex(key)).
+		Scan(&device.DeviceID, &userID, &vaultID, &revokedAt)
+	if err != nil {
+		err = s.db.QueryRow(`SELECT id, user_id, vault_id, revoked_at
+			FROM server_devices WHERE api_key=?`, key).
+			Scan(&device.DeviceID, &userID, &vaultID, &revokedAt)
 	}
-	err = s.db.QueryRow("SELECT id, user_id, revoked_at FROM server_devices WHERE api_key=?", key).Scan(&deviceIDVal, &userIDVal, &revokedAt)
 	if err != nil {
 		jsonErr(w, 401, "invalid API key")
-		return "", "", false
+		return authenticatedDevice{}, false
 	}
 	if revokedAt.Valid && revokedAt.String != "" {
 		jsonErr(w, 401, "device revoked")
-		return "", "", false
+		return authenticatedDevice{}, false
 	}
-	if userIDVal.Valid && userIDVal.String != "" {
+	if userID.Valid {
+		device.UserID = userID.String
+	}
+	if vaultID.Valid {
+		device.VaultID = vaultID.String
+	}
+	if device.UserID != "" {
 		var blocked int
-		s.db.QueryRow("SELECT blocked FROM server_users WHERE id=?", userIDVal.String).Scan(&blocked)
+		s.db.QueryRow("SELECT blocked FROM server_users WHERE id=?", device.UserID).Scan(&blocked)
 		if blocked != 0 {
 			jsonErr(w, 403, "user blocked")
-			return "", "", false
+			return authenticatedDevice{}, false
 		}
 	}
-	s.db.Exec("UPDATE server_devices SET last_seen=? WHERE id=?", time.Now().UTC().Format(time.RFC3339), deviceIDVal.String)
-	return deviceIDVal.String, userIDVal.String, true
+	s.db.Exec("UPDATE server_devices SET last_seen=? WHERE id=?", time.Now().UTC().Format(time.RFC3339), device.DeviceID)
+	return device, true
 }
 
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {

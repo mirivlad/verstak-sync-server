@@ -1,5 +1,10 @@
 package server
 
+import (
+	"database/sql"
+	"fmt"
+)
+
 const serverSchema = `
 CREATE TABLE IF NOT EXISTS server_users (
     id TEXT PRIMARY KEY,
@@ -20,6 +25,7 @@ CREATE TABLE IF NOT EXISTS server_devices (
     token_prefix TEXT,
     token_suffix TEXT,
     user_id TEXT,
+    vault_id TEXT,
     client_version TEXT,
     last_ip TEXT,
     last_seen TEXT,
@@ -36,6 +42,8 @@ CREATE TABLE IF NOT EXISTS server_user_devices (
 CREATE TABLE IF NOT EXISTS server_ops (
     op_id TEXT PRIMARY KEY,
     server_sequence INTEGER,
+    user_id TEXT NOT NULL,
+    vault_id TEXT NOT NULL,
     device_id TEXT NOT NULL,
     entity_type TEXT NOT NULL,
     entity_id TEXT NOT NULL,
@@ -49,17 +57,22 @@ CREATE TABLE IF NOT EXISTS server_ops (
 );
 
 CREATE TABLE IF NOT EXISTS server_tombstones (
+    user_id TEXT NOT NULL,
+    vault_id TEXT NOT NULL,
     entity_type TEXT NOT NULL,
     entity_id TEXT NOT NULL,
     op_id TEXT NOT NULL,
     deleted_at TEXT NOT NULL,
-    PRIMARY KEY (entity_type, entity_id)
+    PRIMARY KEY (user_id, vault_id, entity_type, entity_id)
 );
 
 CREATE TABLE IF NOT EXISTS server_idempotency_keys (
-    idempotency_key TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    vault_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
     response_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, vault_id, idempotency_key)
 );
 
 CREATE TABLE IF NOT EXISTS server_email_tokens (
@@ -107,3 +120,197 @@ CREATE TABLE IF NOT EXISTS server_smtp_config (
     value TEXT NOT NULL
 );
 `
+
+type sqliteColumn struct {
+	primaryKeyOrder int
+}
+
+func migrateServerSchema(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, change := range []struct {
+		table      string
+		column     string
+		definition string
+	}{
+		{"server_devices", "user_id", "TEXT"},
+		{"server_devices", "vault_id", "TEXT"},
+		{"server_ops", "user_id", "TEXT"},
+		{"server_ops", "vault_id", "TEXT"},
+	} {
+		if err := ensureSQLiteColumn(tx, change.table, change.column, change.definition); err != nil {
+			return err
+		}
+	}
+
+	if err := backfillDeviceOwners(tx); err != nil {
+		return err
+	}
+	if err := backfillOperationScope(tx); err != nil {
+		return err
+	}
+	if err := migrateTombstoneScope(tx); err != nil {
+		return err
+	}
+	if err := migrateIdempotencyScope(tx); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_server_ops_scope_sequence
+		ON server_ops(user_id, vault_id, server_sequence)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_server_devices_scope
+		ON server_devices(user_id, vault_id)`); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func ensureSQLiteColumn(tx *sql.Tx, table, column, definition string) error {
+	columns, err := sqliteTableColumns(tx, table)
+	if err != nil {
+		return err
+	}
+	if _, ok := columns[column]; ok {
+		return nil
+	}
+	if _, err := tx.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)); err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+func sqliteTableColumns(tx *sql.Tx, table string) (map[string]sqliteColumn, error) {
+	rows, err := tx.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columns := make(map[string]sqliteColumn)
+	for rows.Next() {
+		var cid, notNull, primaryKeyOrder int
+		var name, dataType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKeyOrder); err != nil {
+			return nil, err
+		}
+		columns[name] = sqliteColumn{primaryKeyOrder: primaryKeyOrder}
+	}
+	return columns, rows.Err()
+}
+
+func backfillDeviceOwners(tx *sql.Tx) error {
+	_, err := tx.Exec(`UPDATE server_devices
+		SET user_id = (
+			SELECT user_id FROM server_user_devices
+			WHERE device_id = server_devices.id
+		)
+		WHERE COALESCE(user_id, '') = ''
+		  AND 1 = (
+			SELECT COUNT(*) FROM server_user_devices
+			WHERE device_id = server_devices.id
+		)`)
+	return err
+}
+
+func backfillOperationScope(tx *sql.Tx) error {
+	if _, err := tx.Exec(`UPDATE server_ops
+		SET user_id = (
+			SELECT user_id FROM server_devices
+			WHERE id = server_ops.device_id
+		)
+		WHERE COALESCE(user_id, '') = ''`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`UPDATE server_ops
+		SET vault_id = COALESCE(
+			NULLIF((SELECT vault_id FROM server_devices WHERE id = server_ops.device_id), ''),
+			'legacy:' || user_id
+		)
+		WHERE COALESCE(vault_id, '') = ''
+		  AND COALESCE(user_id, '') != ''`)
+	return err
+}
+
+func migrateTombstoneScope(tx *sql.Tx) error {
+	if hasScopedPrimaryKey(tx, "server_tombstones", "user_id", "vault_id", "entity_type", "entity_id") {
+		return nil
+	}
+	if _, err := tx.Exec("ALTER TABLE server_tombstones RENAME TO server_tombstones_legacy"); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE TABLE server_tombstones (
+		user_id TEXT NOT NULL,
+		vault_id TEXT NOT NULL,
+		entity_type TEXT NOT NULL,
+		entity_id TEXT NOT NULL,
+		op_id TEXT NOT NULL,
+		deleted_at TEXT NOT NULL,
+		PRIMARY KEY (user_id, vault_id, entity_type, entity_id)
+	)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO server_tombstones
+		(user_id, vault_id, entity_type, entity_id, op_id, deleted_at)
+		SELECT o.user_id, o.vault_id, legacy.entity_type, legacy.entity_id, legacy.op_id, legacy.deleted_at
+		FROM server_tombstones_legacy AS legacy
+		JOIN server_ops AS o ON o.op_id = legacy.op_id
+		WHERE COALESCE(o.user_id, '') != '' AND COALESCE(o.vault_id, '') != ''`); err != nil {
+		return err
+	}
+	_, err := tx.Exec("DROP TABLE server_tombstones_legacy")
+	return err
+}
+
+func migrateIdempotencyScope(tx *sql.Tx) error {
+	if hasScopedPrimaryKey(tx, "server_idempotency_keys", "user_id", "vault_id", "idempotency_key") {
+		return nil
+	}
+	if _, err := tx.Exec("ALTER TABLE server_idempotency_keys RENAME TO server_idempotency_keys_legacy"); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE TABLE server_idempotency_keys (
+		user_id TEXT NOT NULL,
+		vault_id TEXT NOT NULL,
+		idempotency_key TEXT NOT NULL,
+		response_json TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		PRIMARY KEY (user_id, vault_id, idempotency_key)
+	)`); err != nil {
+		return err
+	}
+	// The previous cache was global. Discard it rather than risk replaying a
+	// response for another user or vault after the migration.
+	_, err := tx.Exec("DROP TABLE server_idempotency_keys_legacy")
+	return err
+}
+
+func hasScopedPrimaryKey(tx *sql.Tx, table string, want ...string) bool {
+	columns, err := sqliteTableColumns(tx, table)
+	if err != nil {
+		return false
+	}
+	for index, name := range want {
+		column, ok := columns[name]
+		if !ok || column.primaryKeyOrder != index+1 {
+			return false
+		}
+	}
+	return true
+}
+
+func effectiveVaultScope(userID, vaultID string) string {
+	if vaultID != "" {
+		return vaultID
+	}
+	if userID == "" {
+		return ""
+	}
+	return "legacy:" + userID
+}

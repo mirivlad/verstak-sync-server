@@ -23,9 +23,10 @@ in this change.
 
 ## Data model
 
-`server_devices` gains a nullable `vault_id`. A device created through
-`/api/client/pair` must have a non-empty vault ID. The authenticated device
-therefore identifies one user and one vault.
+`server_devices` gains a nullable `vault_id`. A device created through either
+enrollment endpoint must have a non-empty vault ID that does not use the
+reserved `legacy:` prefix. The authenticated device therefore identifies one
+user and one vault.
 
 `server_ops` gains `user_id` and `vault_id`. New writes always set both from
 the authenticated device. Pull and conflict queries filter both fields.
@@ -39,6 +40,12 @@ Existing devices without `vault_id` use the explicit effective scope
 legacy scope during startup migration. This preserves existing single-vault
 accounts while preventing data from crossing account boundaries. New pairings
 never use the legacy scope.
+
+Desktop sync state, operation queues, cursors, and persisted device IDs are
+vault-local. The desktop recreates its sync service whenever the active vault
+is created, opened, or switched. When it opens a legacy vault state without a
+stored device ID, it obtains the authenticated ID from `/api/client/me` before
+syncing and persists it locally.
 
 ## API contract
 
@@ -61,6 +68,10 @@ new operation/device fields, backfills `user_id` from each operation's device,
 and assigns the explicit legacy scope when an old device has no vault ID.
 Tables whose primary key must change are rebuilt transactionally.
 
+The prior global idempotency cache is intentionally discarded during migration:
+it is only a replay cache and retaining it could replay one tenant's response
+for another tenant.
+
 If an operation cannot be associated with a user, it remains unscoped and is
 not readable through sync APIs. The server must not guess an owner from a
 request body.
@@ -75,5 +86,7 @@ Focused server tests must prove:
 4. scoped idempotency does not replay another tenant's response;
 5. a legacy SQLite database is upgraded with its existing operation retained
    in the matching legacy scope.
+6. switching the active desktop vault rebinds the sync queue, cursor, and
+   device identity to the new vault.
 
 Desktop tests must prove that pairing sends the opened vault's persistent ID.
