@@ -24,6 +24,29 @@ This server provides synchronization between devices running Verstak2. It handle
 ./build/bin/verstak-sync-server --admin-user admin --admin-pass secret
 ```
 
+## Release packages
+
+Build a Linux amd64 archive locally:
+
+```bash
+./scripts/release.sh v0.1.0-alpha.1
+```
+
+It runs the server build and tests, then writes
+`release/verstak-sync-server-linux-amd64-<version>.tar.gz` and `SHA256SUMS`.
+The archive contains the server binary, systemd service file and install
+script.
+
+Publish those same assets to GitHub Releases:
+
+```bash
+./scripts/publish-github-release.sh v0.1.0-alpha.1
+```
+
+The publisher requires an authenticated [`gh`](https://cli.github.com/) CLI
+and a clean local `main` equal to `origin/main`. It creates and pushes an
+annotated tag when necessary, then creates or updates the GitHub Release.
+
 ## Configuration
 
 | Flag | Default | Description |

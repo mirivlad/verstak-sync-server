@@ -13,3 +13,4 @@ server-data/
 # OS
 .DS_Store
 Thumbs.db
+release/
