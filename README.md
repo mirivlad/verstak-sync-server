@@ -187,4 +187,5 @@ CGO_ENABLED=1 go build -o verstak-sync-server ./cmd/server
 
 ## License
 
-MIT
+Copyright © 2026 Verstak contributors. Licensed under
+[GNU AGPLv3 or later](LICENSE).
