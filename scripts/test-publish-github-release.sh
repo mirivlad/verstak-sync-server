@@ -6,6 +6,7 @@ PUBLISHER="$ROOT/scripts/publish-github-release.sh"
 VERSION="v0.0.0-test"
 REPOSITORY="mirivlad/verstak-sync-server"
 ASSET_NAME="verstak-sync-server-linux-amd64-${VERSION}.tar.gz"
+STALE_ASSET="verstak-sync-server-linux-amd64-v0.0.0-stale.tar.gz"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -26,6 +27,8 @@ printf 'archive\n' > "$VERSTAK_RELEASE_DIR/verstak-sync-server-linux-amd64-$1.ta
 printf 'checksum\n' > "$VERSTAK_RELEASE_DIR/SHA256SUMS"
 SCRIPT
 chmod +x "$WORK/release.sh"
+
+printf 'stale archive\n' > "$WORK/release/$STALE_ASSET"
 
 cat > "$WORK/bin/git" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -84,6 +87,10 @@ grep -Fqx "push:origin:refs/tags/$VERSION" "$LOG"
 grep -F "release create $VERSION" "$LOG" >/dev/null
 grep -F "$ASSET_NAME" "$LOG" >/dev/null
 grep -F "SHA256SUMS" "$LOG" >/dev/null
+if grep -F "$STALE_ASSET" "$LOG" >/dev/null; then
+  echo "publisher uploaded an archive from a different release version" >&2
+  exit 1
+fi
 
 run_publisher
 grep -F "release upload $VERSION" "$LOG" >/dev/null

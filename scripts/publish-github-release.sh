@@ -39,14 +39,14 @@ fi
 
 "$RELEASE_SCRIPT" "$VERSION"
 
-shopt -s nullglob
-ASSETS=("$RELEASE_DIR"/*.tar.gz "$RELEASE_DIR"/*.tgz)
+ARCHIVE="$RELEASE_DIR/verstak-sync-server-linux-amd64-$VERSION.tar.gz"
+if [[ ! -f "$ARCHIVE" ]]; then
+  echo "release archive not found: $ARCHIVE" >&2
+  exit 1
+fi
+ASSETS=("$ARCHIVE")
 if [[ -f "$RELEASE_DIR/SHA256SUMS" ]]; then
   ASSETS+=("$RELEASE_DIR/SHA256SUMS")
-fi
-if [[ ${#ASSETS[@]} -eq 0 ]]; then
-  echo "no release assets found in $RELEASE_DIR" >&2
-  exit 1
 fi
 
 if "$GIT_BIN" rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
