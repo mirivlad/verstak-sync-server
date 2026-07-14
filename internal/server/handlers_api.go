@@ -110,7 +110,7 @@ func (s *Server) handleClientPair(w http.ResponseWriter, r *http.Request) {
 		deviceID, req.DeviceName, hex.EncodeToString(apiKey), tokenHash, prefix, suffix,
 		userID, req.VaultID, req.ClientVersion, ip, now, now)
 	if err != nil {
-		jsonErr(w, 500, err.Error())
+		jsonInternalError(w, err)
 		return
 	}
 	s.db.Exec("INSERT OR IGNORE INTO server_user_devices (user_id, device_id) VALUES (?, ?)", userID, deviceID)
@@ -335,7 +335,7 @@ func (s *Server) handleDeviceRegister(w http.ResponseWriter, r *http.Request) {
 		deviceID, req.Name, apiKey, userID, req.VaultID, now, now,
 	)
 	if err != nil {
-		jsonErr(w, 500, err.Error())
+		jsonInternalError(w, err)
 		return
 	}
 	s.db.Exec("INSERT OR IGNORE INTO server_user_devices (user_id, device_id) VALUES (?, ?)", userID, deviceID)
@@ -369,7 +369,7 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 		} `json:"ops"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, 400, "invalid JSON: "+err.Error())
+		jsonErr(w, 400, "invalid JSON")
 		return
 	}
 	if req.IdempotencyKey != "" {
@@ -479,7 +479,7 @@ func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
 		WHERE user_id=? AND vault_id=? AND server_sequence > ? AND server_sequence IS NOT NULL
 		ORDER BY server_sequence`, scope.UserID, scope.VaultID, req.SinceSequence)
 	if err != nil {
-		jsonErr(w, 500, err.Error())
+		jsonInternalError(w, err)
 		return
 	}
 	defer rows.Close()
@@ -515,7 +515,7 @@ func (s *Server) handleBlobs(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "POST":
 		if err := r.ParseMultipartForm(200 << 20); err != nil {
-			jsonErr(w, 400, "multipart error: "+err.Error())
+			jsonErr(w, 400, "invalid multipart request")
 			return
 		}
 		file, header, err := r.FormFile("file")

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -81,7 +82,8 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.db.Query("SELECT id, username, email, confirmed, blocked, created_at FROM server_users ORDER BY created_at DESC")
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("admin users: query failed: %v", err)
+		http.Error(w, t(s.locale(), "server.internalError"), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -127,7 +129,8 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`SELECT d.id, d.name, d.client_version, COALESCE(d.last_seen,''), COALESCE(d.revoked_at,''), d.created_at
 		FROM server_devices d ORDER BY d.created_at DESC`)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("admin devices: query failed: %v", err)
+		http.Error(w, t(s.locale(), "server.internalError"), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -214,11 +217,12 @@ func (s *Server) handleAdminSMTPTest(w http.ResponseWriter, r *http.Request) {
 		to = from
 	}
 	if host == "" || port == "" || from == "" {
-		jsonOK(w, map[string]interface{}{"ok": false, "error": "host, port and from required"})
+		jsonOK(w, map[string]interface{}{"ok": false, "error": t(s.locale(), "admin.smtpRequired")})
 		return
 	}
 	if err := s.smtpTest(host, port, user, pass, security, from, to); err != nil {
-		jsonOK(w, map[string]interface{}{"ok": false, "error": err.Error()})
+		log.Printf("admin SMTP test failed: %v", err)
+		jsonOK(w, map[string]interface{}{"ok": false, "error": t(s.locale(), "admin.smtpTestFailed")})
 		return
 	}
 	jsonOK(w, map[string]interface{}{"ok": true})
@@ -235,7 +239,7 @@ func (s *Server) handleAdminAPIDevices(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN server_users u ON u.id = d.user_id
 		ORDER BY d.created_at DESC`)
 	if err != nil {
-		jsonErr(w, 500, err.Error())
+		jsonInternalError(w, err)
 		return
 	}
 	defer rows.Close()
@@ -265,7 +269,7 @@ func (s *Server) handleAdminAPIKeys(w http.ResponseWriter, r *http.Request) {
 	case "GET":
 		rows, err := s.db.Query("SELECT id, name, api_key FROM server_devices ORDER BY created_at")
 		if err != nil {
-			jsonErr(w, 500, err.Error())
+			jsonInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -313,7 +317,7 @@ func (s *Server) handleAdminAPIKeysDelete(w http.ResponseWriter, r *http.Request
 	id := strings.TrimPrefix(r.URL.Path, "/admin/api/keys/")
 	_, err := s.db.Exec("DELETE FROM server_devices WHERE id=?", id)
 	if err != nil {
-		jsonErr(w, 500, err.Error())
+		jsonInternalError(w, err)
 		return
 	}
 	s.db.Exec("DELETE FROM server_user_devices WHERE device_id=?", id)
@@ -373,7 +377,7 @@ func (s *Server) handleAdminAPIUsers(w http.ResponseWriter, r *http.Request) {
 	args = append(args, perPage, offset)
 	rows, err := s.db.Query(sql, args...)
 	if err != nil {
-		jsonErr(w, 500, err.Error())
+		jsonInternalError(w, err)
 		return
 	}
 	defer rows.Close()
@@ -433,7 +437,7 @@ func (s *Server) handleAdminAPIUserActions(w http.ResponseWriter, r *http.Reques
 		hash, _ := bcrypt.GenerateFromPassword([]byte(newPass), bcrypt.DefaultCost)
 		_, err := s.db.Exec("UPDATE server_users SET password_hash=? WHERE id=?", string(hash), id)
 		if err != nil {
-			jsonErr(w, 500, err.Error())
+			jsonInternalError(w, err)
 			return
 		}
 		jsonOK(w, map[string]interface{}{"status": "ok", "new_password": newPass})
@@ -456,7 +460,7 @@ func (s *Server) handleAdminAPIUserActions(w http.ResponseWriter, r *http.Reques
 		}
 		_, err := s.db.Exec("UPDATE server_users SET username=?, email=? WHERE id=?", editReq.Username, strings.ToLower(editReq.Email), id)
 		if err != nil {
-			jsonErr(w, 500, err.Error())
+			jsonInternalError(w, err)
 			return
 		}
 		jsonOK(w, map[string]interface{}{"status": "ok"})
@@ -534,8 +538,9 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(409)
 				w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), "Username or email already taken", "/admin/create-user")))
 			} else {
+				log.Printf("admin create user: failed: %v", err)
 				w.WriteHeader(500)
-				w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), err.Error(), "/admin/create-user")))
+				w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "admin.createUserFailed"), "/admin/create-user")))
 			}
 			return
 		}
@@ -587,7 +592,7 @@ func (s *Server) handleAdminAPICreateUser(w http.ResponseWriter, r *http.Request
 		if strings.Contains(err.Error(), "UNIQUE") {
 			jsonErr(w, 409, "username or email already taken")
 		} else {
-			jsonErr(w, 500, err.Error())
+			jsonInternalError(w, err)
 		}
 		return
 	}

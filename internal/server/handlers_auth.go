@@ -56,7 +56,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, 409, "username or email already taken")
 			return
 		}
-		jsonErr(w, 500, err.Error())
+		jsonInternalError(w, err)
 		return
 	}
 	tok := make([]byte, 24)

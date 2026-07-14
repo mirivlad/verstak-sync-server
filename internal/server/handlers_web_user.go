@@ -78,8 +78,9 @@ func (s *Server) handleUserWebRegister(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(409)
 				w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), "Username or email already taken", "/register")))
 			} else {
+				log.Printf("register web: create user failed: %v", err)
 				w.WriteHeader(500)
-				w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), err.Error(), "/register")))
+				w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "server.registrationFailed"), "/register")))
 			}
 			return
 		}
@@ -352,7 +353,7 @@ func (s *Server) handleUserDevices(w http.ResponseWriter, r *http.Request) {
 		WHERE ud.user_id = ?
 		ORDER BY d.created_at DESC`, userID)
 	if err != nil {
-		jsonErr(w, 500, err.Error())
+		jsonInternalError(w, err)
 		return
 	}
 	defer rows.Close()

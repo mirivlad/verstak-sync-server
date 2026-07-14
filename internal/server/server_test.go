@@ -81,6 +81,24 @@ func TestAdminDashboardSMTPSecuritySelectUsesApplicationStyles(t *testing.T) {
 	}
 }
 
+func TestUserFacingServerErrorsDoNotExposeInternalDetails(t *testing.T) {
+	for _, name := range []string{"handlers_auth.go", "handlers_api.go", "handlers_admin.go", "handlers_web_user.go"} {
+		source, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for _, forbidden := range []string{
+			"jsonErr(w, 500, err.Error())",
+			"http.Error(w, err.Error(), 500)",
+			"errorPageHTML(locale, t(locale, \"common.error\"), err.Error()",
+		} {
+			if strings.Contains(string(source), forbidden) {
+				t.Errorf("%s exposes an internal error with %q", name, forbidden)
+			}
+		}
+	}
+}
+
 func TestSyncPushPullStoresSequencedOps(t *testing.T) {
 	dir := t.TempDir()
 	s, err := NewServer(filepath.Join(dir, "test.db"), filepath.Join(dir, "data"), &Config{Port: 47732})
