@@ -6,6 +6,7 @@ VERSION="${1:-}"
 REPOSITORY="mirivlad/verstak-sync-server"
 RELEASE_SCRIPT="${VERSTAK_RELEASE_SCRIPT:-$ROOT/scripts/release.sh}"
 RELEASE_DIR="${VERSTAK_RELEASE_DIR:-$ROOT/release}"
+RELEASE_NOTES_DIR="${VERSTAK_RELEASE_NOTES_DIR:-$ROOT/release-notes}"
 GIT_BIN="${GIT_BIN:-git}"
 GH_BIN="${GH_BIN:-gh}"
 
@@ -62,7 +63,17 @@ fi
 if "$GH_BIN" release view "$VERSION" --repo "$REPOSITORY" >/dev/null 2>&1; then
   "$GH_BIN" release upload "$VERSION" "${ASSETS[@]}" --repo "$REPOSITORY" --clobber
 else
-  RELEASE_OPTIONS=(--generate-notes --verify-tag)
+  NOTES_FILE="$RELEASE_NOTES_DIR/$VERSION.md"
+  if [[ ! -s "$NOTES_FILE" ]]; then
+    echo "human-readable release notes are required: $NOTES_FILE" >&2
+    exit 1
+  fi
+
+  RELEASE_OPTIONS=(--notes-file "$NOTES_FILE" --generate-notes --verify-tag)
+  PREVIOUS_TAG="$("$GIT_BIN" describe --tags --abbrev=0 "${HEAD}^" 2>/dev/null || true)"
+  if [[ -n "$PREVIOUS_TAG" ]]; then
+    RELEASE_OPTIONS+=(--notes-start-tag "$PREVIOUS_TAG")
+  fi
   if [[ "$VERSION" == *-* ]]; then
     RELEASE_OPTIONS+=(--prerelease)
   else
