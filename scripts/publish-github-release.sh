@@ -62,12 +62,16 @@ fi
 if "$GH_BIN" release view "$VERSION" --repo "$REPOSITORY" >/dev/null 2>&1; then
   "$GH_BIN" release upload "$VERSION" "${ASSETS[@]}" --repo "$REPOSITORY" --clobber
 else
+  RELEASE_OPTIONS=(--generate-notes --verify-tag)
+  if [[ "$VERSION" == *-* ]]; then
+    RELEASE_OPTIONS+=(--prerelease)
+  else
+    RELEASE_OPTIONS+=(--latest)
+  fi
   "$GH_BIN" release create "$VERSION" "${ASSETS[@]}" \
     --repo "$REPOSITORY" \
     --title "Verstak Sync Server $VERSION" \
-    --generate-notes \
-    --latest \
-    --verify-tag
+    "${RELEASE_OPTIONS[@]}"
 fi
 
 echo "GitHub release:"

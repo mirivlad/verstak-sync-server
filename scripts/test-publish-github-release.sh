@@ -87,6 +87,11 @@ grep -Fqx "push:origin:refs/tags/$VERSION" "$LOG"
 grep -F "release create $VERSION" "$LOG" >/dev/null
 grep -F "$ASSET_NAME" "$LOG" >/dev/null
 grep -F "SHA256SUMS" "$LOG" >/dev/null
+grep -F -- "--prerelease" "$LOG" >/dev/null
+if grep -F -- "--latest" "$LOG" >/dev/null; then
+  echo "alpha release was incorrectly marked latest" >&2
+  exit 1
+fi
 if grep -F "$STALE_ASSET" "$LOG" >/dev/null; then
   echo "publisher uploaded an archive from a different release version" >&2
   exit 1
