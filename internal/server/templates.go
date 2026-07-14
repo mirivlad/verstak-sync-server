@@ -312,6 +312,9 @@ input:focus{outline:none;border-color:#6366f1}
 .form-row{display:flex;gap:8px;margin-bottom:8px;align-items:center}
 .form-row label{font-size:12px;color:#888;min-width:80px;flex-shrink:0}
 .form-row input{flex:1}
+.form-select{font-family:inherit;font-size:14px;padding:8px 32px 8px 12px;border:1px solid #2a2a3c;background-color:#13131f;color:#e4e4ef;border-radius:6px;flex:1;box-sizing:border-box;appearance:none;background-image:linear-gradient(45deg,transparent 50%%,#8b93aa 50%%),linear-gradient(135deg,#8b93aa 50%%,transparent 50%%);background-position:calc(100%% - 16px) 50%%,calc(100%% - 11px) 50%%;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+.form-select option{background:#13131f;color:#e4e4ef}
+.form-select:focus{outline:none;border-color:#6366f1;box-shadow:0 0 0 2px rgba(99,102,241,.24)}
 .toolbar{display:flex;gap:8px;margin:16px 0;flex-wrap:wrap}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:100}
 .modal{background:#1a1a28;border:1px solid #2a2a3c;border-radius:12px;padding:24px;width:420px;max-width:90vw;position:relative;max-height:80vh;overflow-y:auto}
@@ -380,7 +383,7 @@ function testSMTP(){
 <form action="/admin/api/smtp" method="POST">
 <div class="form-row"><label>%[18]s</label><input name="smtp_host" value="%[32]s" placeholder="smtp.example.com"></div>
 <div class="form-row"><label>%[19]s</label><input name="smtp_port" value="%[33]s" placeholder="587"></div>
-<div class="form-row"><label>%[20]s</label><select name="smtp_security" style="font-family:inherit;font-size:14px;padding:8px 12px;border:1px solid #2a2a3c;background:#13131f;color:#e4e4ef;border-radius:6px;flex:1;box-sizing:border-box">
+<div class="form-row"><label>%[20]s</label><select name="smtp_security" class="form-select">
 <option value="starttls"%[34]s>STARTTLS</option>
 <option value="tls"%[35]s>TLS</option>
 <option value="none"%[36]s>%[21]s</option>
