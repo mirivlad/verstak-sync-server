@@ -1,0 +1,7 @@
+{{define "admin_vaults"}}{{template "layout" .}}{{end}}
+{{define "content"}}
+<section class="admin-shell">{{template "admin_nav" .}}<div class="admin-content">
+  <p class="eyebrow">{{t .Locale "admin.storage"}}</p><h1>{{t .Locale "admin.vaults"}}</h1>
+  <section class="card table-card"><div class="table-scroll"><table><thead><tr><th>{{t .Locale "admin.user"}}</th><th>{{t .Locale "device.vault"}}</th><th>{{t .Locale "admin.devices"}}</th><th>{{t .Locale "admin.operations"}}</th><th>{{t .Locale "admin.lastActivity"}}</th></tr></thead><tbody>{{range .Vaults}}<tr><td>{{.User}}</td><td class="mono"><a href="/admin/vault/?user={{.UserID}}&amp;vault={{.Vault}}">{{short .Vault 24}}</a></td><td>{{.Devices}}</td><td>{{.Operations}}</td><td>{{.LastActivity}}</td></tr>{{else}}<tr><td colspan="5" class="empty">{{t .Locale "admin.noVaults"}}</td></tr>{{end}}</tbody></table></div></section>
+</div></section>
+{{end}}

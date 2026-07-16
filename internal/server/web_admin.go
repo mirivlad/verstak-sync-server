@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -13,12 +14,66 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+type oneTimeWebSecret struct {
+	Value     string
+	ExpiresAt time.Time
+}
+
+// storeAdminOneTimeSecret keeps a generated password only long enough for the
+// currently authenticated administrator to retrieve it once. It is never
+// written to the database, URL, audit log, or cookie.
+func (s *Server) storeAdminOneTimeSecret(sessionToken, secret string) {
+	s.secretMu.Lock()
+	defer s.secretMu.Unlock()
+	now := time.Now().UTC()
+	for key, value := range s.webSecrets {
+		if !now.Before(value.ExpiresAt) {
+			delete(s.webSecrets, key)
+		}
+	}
+	s.webSecrets[sha256Hex(sessionToken)] = oneTimeWebSecret{Value: secret, ExpiresAt: now.Add(5 * time.Minute)}
+}
+
+func (s *Server) takeAdminOneTimeSecret(sessionToken string) string {
+	s.secretMu.Lock()
+	defer s.secretMu.Unlock()
+	key := sha256Hex(sessionToken)
+	value, ok := s.webSecrets[key]
+	delete(s.webSecrets, key)
+	if !ok || !time.Now().UTC().Before(value.ExpiresAt) {
+		return ""
+	}
+	return value.Value
+}
+
 func (s *Server) handleAdminRoot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 	http.Redirect(w, r, "/admin/dashboard", http.StatusFound)
+}
+
+func (s *Server) handleAdminPasswordResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if !s.requireAdminCookie(w, r) {
+		return
+	}
+	cookie, err := r.Cookie("admin_session")
+	if err != nil {
+		http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+		return
+	}
+	secret := s.takeAdminOneTimeSecret(cookie.Value)
+	if secret == "" {
+		http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store, max-age=0")
+	s.renderPage(w, r, "admin_password_result", webPage{Title: "admin.resetPassword", Admin: true, AdminPage: "users", OneTimeSecret: secret})
 }
 
 func (s *Server) handleAdminVaultDetail(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +90,7 @@ func (s *Server) handleAdminVaultDetail(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var d webVaultDetail
-	if err := s.db.QueryRow(`SELECT COALESCE((SELECT username FROM server_users WHERE id=?),''), COUNT(DISTINCT d.id), COUNT(DISTINCT o.op_id), COALESCE(MAX(d.last_seen),'') FROM server_devices d LEFT JOIN server_ops o ON o.user_id=d.user_id AND o.vault_id=d.vault_id WHERE d.user_id=? AND d.vault_id=?`, userID, userID, vaultID).Scan(&d.User, &d.Devices, &d.Operations, &d.LastActivity); err != nil {
+	if err := s.db.QueryRow(`SELECT COALESCE((SELECT username FROM server_users WHERE id=?),''), COUNT(DISTINCT d.id), COUNT(DISTINCT CASE WHEN COALESCE(d.revoked_at,'')='' THEN d.id END), COUNT(DISTINCT CASE WHEN COALESCE(d.revoked_at,'')!='' THEN d.id END), COUNT(DISTINCT o.op_id), COALESCE(MAX(o.server_sequence),0), COALESCE(MAX(d.last_seen),'') FROM server_devices d LEFT JOIN server_ops o ON o.user_id=d.user_id AND o.vault_id=d.vault_id WHERE d.user_id=? AND d.vault_id=?`, userID, userID, vaultID).Scan(&d.User, &d.Devices, &d.Active, &d.Revoked, &d.Operations, &d.Sequence, &d.LastActivity); err != nil {
 		jsonInternalError(w, err)
 		return
 	}
@@ -44,7 +99,31 @@ func (s *Server) handleAdminVaultDetail(w http.ResponseWriter, r *http.Request) 
 		jsonInternalError(w, err)
 		return
 	}
-	s.renderPage(w, r, "vault_detail", webPage{Title: "admin.vaults", Admin: true, VaultDetail: d})
+	rows, err := s.db.Query(`SELECT d.id,d.name,COALESCE(u.username,''),COALESCE(d.vault_id,''),COALESCE(d.client_version,''),COALESCE(d.last_ip,''),COALESCE(d.last_seen,''),COALESCE(d.revoked_at,''),d.created_at,COALESCE(d.token_prefix,''),COALESCE(d.token_suffix,'') FROM server_devices d LEFT JOIN server_users u ON u.id=d.user_id WHERE d.user_id=? AND d.vault_id=? ORDER BY d.created_at DESC`, userID, vaultID)
+	if err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	defer rows.Close()
+	var devices []webAdminDevice
+	for rows.Next() {
+		var device webAdminDevice
+		var revoked, prefix, suffix string
+		if err := rows.Scan(&device.ID, &device.Name, &device.User, &device.Vault, &device.Version, &device.LastIP, &device.LastSeen, &revoked, &device.CreatedAt, &prefix, &suffix); err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+		device.Revoked = revoked != ""
+		if prefix != "" || suffix != "" {
+			device.TokenHint = prefix + "…" + suffix
+		}
+		devices = append(devices, device)
+	}
+	if err := rows.Err(); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	s.renderPage(w, r, "vault_detail", webPage{Title: "admin.vaults", Admin: true, AdminPage: "vaults", VaultDetail: d, VaultDevices: devices})
 }
 
 func (s *Server) handleAdminCreateUserWeb(w http.ResponseWriter, r *http.Request) {
@@ -122,6 +201,20 @@ func (s *Server) handleAdminWeb(w http.ResponseWriter, r *http.Request) {
 	}
 	data := webPage{Title: "admin." + page, Admin: true, AdminPage: page, Stats: stats, Health: s.healthStatus(r.Context())}
 	switch page {
+	case "dashboard":
+		data.Audit, _, err = s.webAudit(webList{Page: 1, PerPage: 5})
+		if err == nil {
+			data.AdminDevices, _, err = s.webAdminDevices(webList{Page: 1, PerPage: 5})
+		}
+		if !data.Health.DatabaseReachable || !data.Health.BlobStorageWritable {
+			data.Warnings = append(data.Warnings, "admin.warningReadiness")
+		}
+		if s.smtpGet("smtp_host") == "" {
+			data.Warnings = append(data.Warnings, "admin.warningSMTP")
+		}
+		if stats.Operations > 100000 {
+			data.Warnings = append(data.Warnings, "admin.warningOperations")
+		}
 	case "users":
 		data.List = webListFromRequest(r)
 		data.AdminUsers, data.List, err = s.webAdminUsers(data.List)
@@ -135,21 +228,38 @@ func (s *Server) handleAdminWeb(w http.ResponseWriter, r *http.Request) {
 		data.Audit, data.List, err = s.webAudit(data.List)
 	case "settings":
 		data.SMTP = s.webSMTP()
+		switch r.URL.Query().Get("flash") {
+		case "settings_saved":
+			data.Flash = "admin.settingsSaved"
+		case "smtp_saved":
+			data.Flash = "admin.smtpSaved"
+		case "smtp_test_passed":
+			data.Flash = "admin.smtpPassed"
+		case "smtp_test_failed":
+			data.Flash = "admin.smtpTestFailed"
+		}
+	case "storage":
+		if r.URL.Query().Get("flash") == "cleanup_done" {
+			data.Flash = "admin.cleanupDone"
+		}
 	}
 	if err != nil {
 		log.Printf("admin %s: %v", page, err)
 		s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/admin/dashboard")
 		return
 	}
-	if page == "settings" {
-		s.renderPage(w, r, "admin_settings", data)
-		return
-	}
-	s.renderPage(w, r, "admin", data)
+	s.renderPage(w, r, "admin_"+page, data)
 }
 
 func webListFromRequest(r *http.Request) webList {
-	list := webList{Query: strings.TrimSpace(r.URL.Query().Get("q")), Status: strings.TrimSpace(r.URL.Query().Get("status")), Page: 1, PerPage: 25}
+	trim := func(value string) string {
+		value = strings.TrimSpace(value)
+		if len(value) > 160 {
+			return value[:160]
+		}
+		return value
+	}
+	list := webList{Query: trim(r.URL.Query().Get("q")), Status: trim(r.URL.Query().Get("status")), Sort: trim(r.URL.Query().Get("sort")), User: trim(r.URL.Query().Get("user")), Vault: trim(r.URL.Query().Get("vault")), Version: trim(r.URL.Query().Get("version")), Event: trim(r.URL.Query().Get("event")), Severity: trim(r.URL.Query().Get("severity")), Page: 1, PerPage: 25}
 	if value, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && value > 0 {
 		list.Page = value
 	}
@@ -198,9 +308,14 @@ func (s *Server) webAdminUsers(list webList) ([]webAdminUser, webList, error) {
 		return nil, list, err
 	}
 	list = finishWebList(list, total)
+	order := map[string]string{"username": "u.username COLLATE NOCASE ASC", "last_seen": "COALESCE(u.last_seen,'') DESC", "created": "u.created_at DESC"}[list.Sort]
+	if order == "" {
+		list.Sort = "created"
+		order = "u.created_at DESC"
+	}
 	queryArgs := append([]interface{}{}, args...)
 	queryArgs = append(queryArgs, list.PerPage, (list.Page-1)*list.PerPage)
-	rows, err := s.db.Query(`SELECT u.id,u.username,u.email,u.confirmed,u.blocked,u.created_at,COALESCE(u.last_seen,''),COUNT(ud.device_id) FROM server_users u LEFT JOIN server_user_devices ud ON ud.user_id=u.id`+where+` GROUP BY u.id ORDER BY u.created_at DESC LIMIT ? OFFSET ?`, queryArgs...)
+	rows, err := s.db.Query(`SELECT u.id,u.username,u.email,u.confirmed,u.blocked,u.created_at,COALESCE(u.last_seen,''),COUNT(ud.device_id),(SELECT COUNT(DISTINCT vd.vault_id) FROM server_devices vd WHERE vd.user_id=u.id AND COALESCE(vd.vault_id,'')!='') FROM server_users u LEFT JOIN server_user_devices ud ON ud.user_id=u.id`+where+` GROUP BY u.id ORDER BY `+order+` LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		return nil, list, err
 	}
@@ -209,7 +324,7 @@ func (s *Server) webAdminUsers(list webList) ([]webAdminUser, webList, error) {
 	for rows.Next() {
 		var u webAdminUser
 		var confirmed, blocked int
-		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &confirmed, &blocked, &u.CreatedAt, &u.LastSeen, &u.Devices); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &confirmed, &blocked, &u.CreatedAt, &u.LastSeen, &u.Devices, &u.Vaults); err != nil {
 			return nil, list, err
 		}
 		u.Confirmed = confirmed != 0
@@ -222,27 +337,44 @@ func (s *Server) webAdminUsers(list webList) ([]webAdminUser, webList, error) {
 func (s *Server) webAdminDevices(list webList) ([]webAdminDevice, webList, error) {
 	where := ""
 	args := []interface{}{}
-	if list.Query != "" {
-		where = " WHERE (d.name LIKE ? OR u.username LIKE ? OR d.vault_id LIKE ?)"
-		like := "%" + list.Query + "%"
-		args = append(args, like, like, like)
-	}
-	if list.Status == "active" || list.Status == "revoked" {
-		condition := map[string]string{"active": "COALESCE(d.revoked_at,'')=''", "revoked": "COALESCE(d.revoked_at,'')!=''"}[list.Status]
+	addCondition := func(condition string, values ...interface{}) {
 		if where == "" {
 			where = " WHERE " + condition
 		} else {
 			where += " AND " + condition
 		}
+		args = append(args, values...)
+	}
+	if list.Query != "" {
+		like := "%" + list.Query + "%"
+		addCondition("(d.name LIKE ? OR u.username LIKE ? OR d.vault_id LIKE ?)", like, like, like)
+	}
+	if list.Status == "active" || list.Status == "revoked" {
+		condition := map[string]string{"active": "COALESCE(d.revoked_at,'')=''", "revoked": "COALESCE(d.revoked_at,'')!=''"}[list.Status]
+		addCondition(condition)
+	}
+	if list.User != "" {
+		addCondition("u.username LIKE ?", "%"+list.User+"%")
+	}
+	if list.Vault != "" {
+		addCondition("d.vault_id LIKE ?", "%"+list.Vault+"%")
+	}
+	if list.Version != "" {
+		addCondition("d.client_version LIKE ?", "%"+list.Version+"%")
 	}
 	var total int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM server_devices d LEFT JOIN server_users u ON u.id=d.user_id`+where, args...).Scan(&total); err != nil {
 		return nil, list, err
 	}
 	list = finishWebList(list, total)
+	order := map[string]string{"name": "d.name COLLATE NOCASE ASC", "last_seen": "COALESCE(d.last_seen,'') DESC", "created": "d.created_at DESC"}[list.Sort]
+	if order == "" {
+		list.Sort = "created"
+		order = "d.created_at DESC"
+	}
 	queryArgs := append([]interface{}{}, args...)
 	queryArgs = append(queryArgs, list.PerPage, (list.Page-1)*list.PerPage)
-	rows, err := s.db.Query(`SELECT d.id,d.name,COALESCE(u.username,''),COALESCE(d.vault_id,''),COALESCE(d.client_version,''),COALESCE(d.last_seen,''),COALESCE(d.revoked_at,''),d.created_at FROM server_devices d LEFT JOIN server_users u ON u.id=d.user_id`+where+` ORDER BY d.created_at DESC LIMIT ? OFFSET ?`, queryArgs...)
+	rows, err := s.db.Query(`SELECT d.id,d.name,COALESCE(u.username,''),COALESCE(d.vault_id,''),COALESCE(d.client_version,''),COALESCE(d.last_ip,''),COALESCE(d.last_seen,''),COALESCE(d.revoked_at,''),d.created_at,COALESCE(d.token_prefix,''),COALESCE(d.token_suffix,'') FROM server_devices d LEFT JOIN server_users u ON u.id=d.user_id`+where+` ORDER BY `+order+` LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		return nil, list, err
 	}
@@ -250,9 +382,12 @@ func (s *Server) webAdminDevices(list webList) ([]webAdminDevice, webList, error
 	var out []webAdminDevice
 	for rows.Next() {
 		var d webAdminDevice
-		var revoked string
-		if err := rows.Scan(&d.ID, &d.Name, &d.User, &d.Vault, &d.Version, &d.LastSeen, &revoked, &d.CreatedAt); err != nil {
+		var revoked, prefix, suffix string
+		if err := rows.Scan(&d.ID, &d.Name, &d.User, &d.Vault, &d.Version, &d.LastIP, &d.LastSeen, &revoked, &d.CreatedAt, &prefix, &suffix); err != nil {
 			return nil, list, err
+		}
+		if prefix != "" || suffix != "" {
+			d.TokenHint = prefix + "…" + suffix
 		}
 		d.Revoked = revoked != ""
 		if d.LastSeen == "" {
@@ -283,19 +418,37 @@ func (s *Server) webVaults() ([]webVault, error) {
 func (s *Server) webAudit(list webList) ([]webAudit, webList, error) {
 	where := ""
 	args := []interface{}{}
+	addCondition := func(condition string, values ...interface{}) {
+		if where == "" {
+			where = " WHERE " + condition
+		} else {
+			where += " AND " + condition
+		}
+		args = append(args, values...)
+	}
 	if list.Query != "" {
-		where = " WHERE (event_type LIKE ? OR user_id LIKE ? OR device_id LIKE ?)"
 		like := "%" + list.Query + "%"
-		args = append(args, like, like, like)
+		addCondition("(a.event_type LIKE ? OR a.user_id LIKE ? OR a.device_id LIKE ?)", like, like, like)
+	}
+	if list.Event != "" {
+		addCondition("a.event_type LIKE ?", "%"+list.Event+"%")
+	}
+	if list.User != "" {
+		addCondition("a.user_id LIKE ?", "%"+list.User+"%")
+	}
+	if list.Severity == "error" {
+		addCondition("(a.event_type LIKE '%failed%' OR a.event_type LIKE '%error%')")
+	} else if list.Severity == "warning" {
+		addCondition("a.event_type LIKE '%rate_limit%'")
 	}
 	var total int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM server_audit_log"+where, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM server_audit_log a"+where, args...).Scan(&total); err != nil {
 		return nil, list, err
 	}
 	list = finishWebList(list, total)
 	queryArgs := append([]interface{}{}, args...)
 	queryArgs = append(queryArgs, list.PerPage, (list.Page-1)*list.PerPage)
-	rows, err := s.db.Query(`SELECT event_type,COALESCE(user_id,''),COALESCE(device_id,''),created_at FROM server_audit_log`+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, queryArgs...)
+	rows, err := s.db.Query(`SELECT a.event_type,COALESCE(u.username,a.user_id,''),COALESCE(d.name,a.device_id,''),COALESCE(a.ip,''),COALESCE(a.message,''),a.created_at FROM server_audit_log a LEFT JOIN server_users u ON u.id=a.user_id LEFT JOIN server_devices d ON d.id=a.device_id`+where+` ORDER BY a.id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		return nil, list, err
 	}
@@ -303,12 +456,23 @@ func (s *Server) webAudit(list webList) ([]webAudit, webList, error) {
 	var out []webAudit
 	for rows.Next() {
 		var a webAudit
-		if err := rows.Scan(&a.Event, &a.User, &a.Device, &a.At); err != nil {
+		if err := rows.Scan(&a.Event, &a.User, &a.Device, &a.IP, &a.Message, &a.At); err != nil {
 			return nil, list, err
 		}
+		a.Severity = auditSeverity(a.Event)
 		out = append(out, a)
 	}
 	return out, list, rows.Err()
+}
+
+func auditSeverity(event string) string {
+	if strings.Contains(event, "failed") || strings.Contains(event, "error") {
+		return "error"
+	}
+	if strings.Contains(event, "rate_limit") || strings.Contains(event, "revoked") || strings.Contains(event, "blocked") {
+		return "warning"
+	}
+	return "info"
 }
 
 func (s *Server) webSMTP() webSMTP {
@@ -343,10 +507,19 @@ func (s *Server) handleAdminWebAction(w http.ResponseWriter, r *http.Request) {
 		if locale != "ru" && locale != "en" {
 			locale = "en"
 		}
+		publicURL := strings.TrimRight(strings.TrimSpace(r.FormValue("public_url")), "/")
+		if publicURL != "" {
+			parsed, err := url.ParseRequestURI(publicURL)
+			if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+				s.renderWebError(w, r, http.StatusBadRequest, "error.invalidPublicURL", "/admin/settings")
+				return
+			}
+		}
 		s.cfg.mu.Lock()
 		s.cfg.Web.DefaultLocale = locale
 		s.cfg.Web.AllowRegistration = r.FormValue("allow_registration") == "on"
 		s.cfg.Web.ServerName = strings.TrimSpace(r.FormValue("server_name"))
+		s.cfg.PublicURL = publicURL
 		err := s.cfg.saveLocked()
 		s.cfg.mu.Unlock()
 		if err != nil {
@@ -354,7 +527,7 @@ func (s *Server) handleAdminWebAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.auditLog("web_settings_updated", "", "", s.clientIP(r), "updated by administrator")
-		http.Redirect(w, r, "/admin/settings", http.StatusSeeOther)
+		http.Redirect(w, r, "/admin/settings?flash=settings_saved", http.StatusSeeOther)
 	case "toggle-user":
 		if !s.adminReauth(r, session.SubjectID) {
 			s.renderWebError(w, r, http.StatusForbidden, "error.invalidCredentials", "/admin/users")
@@ -412,14 +585,36 @@ func (s *Server) handleAdminWebAction(w http.ResponseWriter, r *http.Request) {
 		}
 		s.auditLog("user_updated", id, "", s.clientIP(r), "updated by administrator")
 		http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+	case "confirm-user":
+		if !s.adminReauth(r, session.SubjectID) {
+			s.renderWebError(w, r, http.StatusForbidden, "error.invalidCredentials", "/admin/users")
+			return
+		}
+		id := r.FormValue("id")
+		result, err := s.db.Exec("UPDATE server_users SET confirmed=1 WHERE id=?", id)
+		if err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed == 0 {
+			if err != nil {
+				jsonInternalError(w, err)
+			} else {
+				s.renderWebError(w, r, http.StatusNotFound, "error.badRequest", "/admin/users")
+			}
+			return
+		}
+		s.auditLog("user_confirmed", id, "", s.clientIP(r), "confirmed by administrator")
+		http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
 	case "reset-user-password":
 		if !s.adminReauth(r, session.SubjectID) {
 			s.renderWebError(w, r, http.StatusForbidden, "error.invalidCredentials", "/admin/users")
 			return
 		}
-		id, password := r.FormValue("id"), r.FormValue("new_password")
-		if err := validatePassword(password); err != "" {
-			s.renderWebError(w, r, http.StatusBadRequest, "error.passwordInvalid", "/admin/users")
+		id := r.FormValue("id")
+		password, err := randomSecret(16)
+		if err != nil {
+			jsonInternalError(w, err)
 			return
 		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -446,7 +641,13 @@ func (s *Server) handleAdminWebAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.auditLog("user_password_reset", id, "", s.clientIP(r), "reset by administrator")
-		http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+		cookie, err := r.Cookie("admin_session")
+		if err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+		s.storeAdminOneTimeSecret(cookie.Value, password)
+		http.Redirect(w, r, "/admin/password-result", http.StatusSeeOther)
 	case "delete-user":
 		if !s.adminReauth(r, session.SubjectID) {
 			s.renderWebError(w, r, http.StatusForbidden, "error.invalidCredentials", "/admin/users")
@@ -483,6 +684,43 @@ func (s *Server) handleAdminWebAction(w http.ResponseWriter, r *http.Request) {
 		}
 		s.auditLog("device_revoked", "", id, s.clientIP(r), "revoked by administrator")
 		http.Redirect(w, r, "/admin/devices", http.StatusSeeOther)
+	case "delete-device":
+		if !s.adminReauth(r, session.SubjectID) {
+			s.renderWebError(w, r, http.StatusForbidden, "error.invalidCredentials", "/admin/devices")
+			return
+		}
+		id := r.FormValue("id")
+		tx, err := s.db.Begin()
+		if err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+		defer tx.Rollback()
+		var revoked string
+		if err := tx.QueryRow("SELECT COALESCE(revoked_at,'') FROM server_devices WHERE id=?", id).Scan(&revoked); err != nil {
+			if err == sql.ErrNoRows {
+				s.renderWebError(w, r, http.StatusNotFound, "error.badRequest", "/admin/devices")
+			} else {
+				jsonInternalError(w, err)
+			}
+			return
+		}
+		if revoked == "" {
+			s.renderWebError(w, r, http.StatusConflict, "error.deviceMustBeRevoked", "/admin/devices")
+			return
+		}
+		for _, statement := range []string{"DELETE FROM server_user_devices WHERE device_id=?", "DELETE FROM server_devices WHERE id=?"} {
+			if _, err := tx.Exec(statement, id); err != nil {
+				jsonInternalError(w, err)
+				return
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+		s.auditLog("device_deleted", "", id, s.clientIP(r), "revoked device deleted by administrator")
+		http.Redirect(w, r, "/admin/devices", http.StatusSeeOther)
 	case "smtp":
 		if !s.adminReauth(r, session.SubjectID) {
 			s.renderWebError(w, r, http.StatusForbidden, "error.invalidCredentials", "/admin/settings")
@@ -511,7 +749,29 @@ func (s *Server) handleAdminWebAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.auditLog("smtp_settings_updated", "", "", s.clientIP(r), "updated by administrator")
-		http.Redirect(w, r, "/admin/settings", http.StatusSeeOther)
+		http.Redirect(w, r, "/admin/settings?flash=smtp_saved", http.StatusSeeOther)
+	case "smtp-test":
+		if !s.adminReauth(r, session.SubjectID) {
+			s.renderWebError(w, r, http.StatusForbidden, "error.invalidCredentials", "/admin/settings")
+			return
+		}
+		smtp := s.webSMTP()
+		to := strings.TrimSpace(r.FormValue("test_to"))
+		if to == "" {
+			to = smtp.From
+		}
+		if smtp.Host == "" || smtp.Port == "" || smtp.From == "" || to == "" {
+			http.Redirect(w, r, "/admin/settings?flash=smtp_test_failed", http.StatusSeeOther)
+			return
+		}
+		if err := s.smtpTest(smtp.Host, smtp.Port, smtp.User, s.smtpGet("smtp_pass"), smtp.Security, smtp.From, to); err != nil {
+			log.Printf("admin SMTP test failed: %v", err)
+			s.auditLog("smtp_test_failed", "", "", s.clientIP(r), "tested by administrator")
+			http.Redirect(w, r, "/admin/settings?flash=smtp_test_failed", http.StatusSeeOther)
+			return
+		}
+		s.auditLog("smtp_test_passed", "", "", s.clientIP(r), "tested by administrator")
+		http.Redirect(w, r, "/admin/settings?flash=smtp_test_passed", http.StatusSeeOther)
 	case "cleanup":
 		if !s.adminReauth(r, session.SubjectID) {
 			s.renderWebError(w, r, http.StatusForbidden, "error.invalidCredentials", "/admin/storage")
@@ -522,7 +782,7 @@ func (s *Server) handleAdminWebAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.auditLog("retention_cleanup", "", "", s.clientIP(r), "safe retention cleanup run by administrator")
-		http.Redirect(w, r, "/admin/storage", http.StatusSeeOther)
+		http.Redirect(w, r, "/admin/storage?flash=cleanup_done", http.StatusSeeOther)
 	default:
 		s.renderWebError(w, r, http.StatusBadRequest, "error.badRequest", "/admin/dashboard")
 	}

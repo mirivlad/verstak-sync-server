@@ -22,9 +22,12 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 			s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/admin/login")
 			return
 		}
+		if !s.requirePublicWebMutation(w, r, "/admin/login") {
+			return
+		}
 		user := r.FormValue("username")
 		pass := r.FormValue("password")
-		if !s.allowRate(w, r, "login", user) {
+		if !s.allowWebRate(w, r, "login", user, "/admin/login") {
 			return
 		}
 		if !s.cfg.CheckAdmin(user, pass) {

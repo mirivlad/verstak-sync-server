@@ -640,12 +640,14 @@ func pairSyncDevice(t *testing.T, serverURL, username, password, vaultID string)
 func postWebReset(t *testing.T, s *Server, token, password string) *httptest.ResponseRecorder {
 	t.Helper()
 	form := url.Values{
-		"token":    {token},
-		"password": {password},
-		"confirm":  {password},
+		"token":       {token},
+		"password":    {password},
+		"confirm":     {password},
+		"locale_csrf": {"test-public-csrf"},
 	}
 	request := httptest.NewRequest(http.MethodPost, "/reset", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(&http.Cookie{Name: webLocaleCSRFCookieName, Value: "test-public-csrf"})
 	response := httptest.NewRecorder()
 	s.mux.ServeHTTP(response, request)
 	return response

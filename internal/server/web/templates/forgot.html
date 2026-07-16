@@ -1,5 +1,5 @@
 {{define "forgot"}}{{template "layout" .}}{{end}}
 {{define "content"}}
 <section class="auth-card card"><p class="eyebrow">{{t .Locale "auth.account"}}</p><h1>{{t .Locale "auth.forgotTitle"}}</h1><p class="muted">{{t .Locale "auth.forgotDescription"}}</p>
-<form method="post" action="/forgot" class="stack"><label>{{t .Locale "field.email"}}<input name="email" type="email" autocomplete="email" required autofocus></label><button class="button primary" type="submit">{{t .Locale "auth.sendLink"}}</button></form><p class="muted"><a href="/login">{{t .Locale "auth.backLogin"}}</a></p></section>
+<form method="post" action="/forgot" class="stack"><input type="hidden" name="locale_csrf" value="{{.LocaleCSRF}}"><label>{{t .Locale "field.email"}}<input name="email" type="email" autocomplete="email" required autofocus></label><button class="button primary" type="submit">{{t .Locale "auth.sendLink"}}</button></form><p class="muted"><a href="/login">{{t .Locale "auth.backLogin"}}</a></p></section>
 {{end}}

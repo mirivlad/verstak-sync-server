@@ -1,0 +1,14 @@
+{{define "admin_nav"}}
+<aside class="admin-nav" aria-label="{{t .Locale "admin.navigation"}}">
+  <p class="eyebrow">{{t .Locale "admin.eyebrow"}}</p>
+  <a href="/admin/dashboard" {{if eq .AdminPage "dashboard"}}aria-current="page"{{end}}>{{t .Locale "admin.overview"}}</a>
+  <a href="/admin/users" {{if eq .AdminPage "users"}}aria-current="page"{{end}}>{{t .Locale "admin.users"}}</a>
+  <a href="/admin/devices" {{if eq .AdminPage "devices"}}aria-current="page"{{end}}>{{t .Locale "admin.devices"}}</a>
+  <a href="/admin/vaults" {{if eq .AdminPage "vaults"}}aria-current="page"{{end}}>{{t .Locale "admin.vaults"}}</a>
+  <a href="/admin/storage" {{if eq .AdminPage "storage"}}aria-current="page"{{end}}>{{t .Locale "admin.storage"}}</a>
+  <a href="/admin/audit" {{if eq .AdminPage "audit"}}aria-current="page"{{end}}>{{t .Locale "admin.audit"}}</a>
+  <a href="/admin/settings" {{if eq .AdminPage "settings"}}aria-current="page"{{end}}>{{t .Locale "admin.settings"}}</a>
+  <a href="/admin/diagnostics" {{if eq .AdminPage "diagnostics"}}aria-current="page"{{end}}>{{t .Locale "admin.diagnostics"}}</a>
+  <form method="post" action="/admin/logout"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button class="link-button" type="submit">{{t .Locale "auth.logout"}}</button></form>
+</aside>
+{{end}}

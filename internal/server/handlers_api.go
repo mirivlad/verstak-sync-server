@@ -15,7 +15,7 @@ import (
 
 func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(r.URL.Path, "/api/") {
-		s.renderPageStatus(w, r, "error", webPage{Title: "error.label", Heading: "error.badRequest", Message: "error.tryAgain", BackURL: "/"}, http.StatusNotFound)
+		s.renderPageStatus(w, r, "error", webPage{Title: "error.notFound", Heading: "error.notFound", Message: "error.notFound", BackURL: "/"}, http.StatusNotFound)
 		return
 	}
 	jsonErr(w, 404, "not found")

@@ -102,6 +102,9 @@ func (s *Server) handleConfirm(w http.ResponseWriter, r *http.Request) {
 		}
 		tokenStr = req.Token
 	} else if err := r.ParseForm(); err == nil {
+		if !s.requirePublicWebMutation(w, r, "/login") {
+			return
+		}
 		tokenStr = r.FormValue("token")
 	} else {
 		jsonErrCode(w, http.StatusBadRequest, "invalid_request", "invalid form")

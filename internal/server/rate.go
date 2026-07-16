@@ -18,12 +18,12 @@ var ratePolicies = map[string]RatePolicy{
 	"admin-reset":     {Limit: 8, Window: time.Hour},
 }
 
-// allowRate applies an IP limit and, where a login/account is supplied, an
-// additional bounded account bucket. It never logs submitted credentials.
-func (s *Server) allowRate(w http.ResponseWriter, r *http.Request, action, account string) bool {
+// rateRetryAfter applies an IP limit and, where a login/account is supplied,
+// an additional bounded account bucket. It never logs submitted credentials.
+func (s *Server) rateRetryAfter(r *http.Request, action, account string) (int, bool) {
 	policy, ok := ratePolicies[action]
 	if !ok {
-		return true
+		return 0, true
 	}
 	ip := s.clientIP(r)
 	s.limiter.Cleanup(2 * policy.Window)
@@ -40,13 +40,34 @@ func (s *Server) allowRate(w http.ResponseWriter, r *http.Request, action, accou
 			if seconds < 1 {
 				seconds = 1
 			}
-			w.Header().Set("Retry-After", strconvItoa(seconds))
 			s.auditLog("rate_limit_exceeded", "", "", ip, "rate limit: "+action)
-			jsonErr(w, http.StatusTooManyRequests, "too many attempts")
-			return false
+			return seconds, false
 		}
 	}
-	return true
+	return 0, true
+}
+
+// allowRate writes API-compatible JSON for transport endpoints.
+func (s *Server) allowRate(w http.ResponseWriter, r *http.Request, action, account string) bool {
+	retryAfter, allowed := s.rateRetryAfter(r, action, account)
+	if allowed {
+		return true
+	}
+	w.Header().Set("Retry-After", strconvItoa(retryAfter))
+	jsonErr(w, http.StatusTooManyRequests, "too many attempts")
+	return false
+}
+
+// allowWebRate is the HTML counterpart of allowRate. Browser forms receive a
+// localized error page instead of a machine-readable API error.
+func (s *Server) allowWebRate(w http.ResponseWriter, r *http.Request, action, account, back string) bool {
+	retryAfter, allowed := s.rateRetryAfter(r, action, account)
+	if allowed {
+		return true
+	}
+	w.Header().Set("Retry-After", strconvItoa(retryAfter))
+	s.renderWebError(w, r, http.StatusTooManyRequests, "error.rateLimited", back)
+	return false
 }
 
 func strconvItoa(value int) string {

@@ -1,0 +1,7 @@
+{{define "admin_diagnostics"}}{{template "layout" .}}{{end}}
+{{define "content"}}
+<section class="admin-shell">{{template "admin_nav" .}}<div class="admin-content">
+  <p class="eyebrow">{{t .Locale "admin.diagnostics"}}</p><h1>{{t .Locale "admin.diagnostics"}}</h1>
+  <section class="card panel"><dl class="details"><dt>{{t .Locale "admin.status"}}</dt><dd>{{statuslabel .Locale .Health.Status}}</dd><dt>{{t .Locale "admin.database"}}</dt><dd>{{boollabel .Locale .Health.DatabaseReachable}}</dd><dt>{{t .Locale "admin.blobStorage"}}</dt><dd>{{boollabel .Locale .Health.BlobStorageWritable}}</dd><dt>{{t .Locale "admin.schema"}}</dt><dd>{{.Health.SchemaVersion}}</dd><dt>{{t .Locale "admin.serverTime"}}</dt><dd>{{webtime .Locale .Health.ServerTime}}</dd></dl><div class="actions"><a class="button secondary" href="/admin/diagnostics">{{t .Locale "admin.refresh"}}</a><button class="button secondary" type="button" data-copy-diagnostics="/admin/diagnostics.json" data-copy-label="{{t .Locale "admin.copyDiagnostics"}}" data-copied-label="{{t .Locale "admin.copied"}}">{{t .Locale "admin.copyDiagnostics"}}</button><a class="button secondary" href="/api/v1/health">{{t .Locale "admin.healthJSON"}}</a><a class="button secondary" href="/admin/diagnostics.json">{{t .Locale "admin.downloadDiagnostics"}}</a></div></section>
+</div></section>
+{{end}}

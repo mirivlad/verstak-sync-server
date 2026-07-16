@@ -17,7 +17,7 @@
     </nav>
     <form class="locale-form" action="/locale" method="post" aria-label="{{t .Locale "locale.label"}}">
       <input type="hidden" name="from" value="{{.CurrentURL}}">
-      {{if .CSRF}}<input type="hidden" name="csrf_token" value="{{.CSRF}}">{{end}}
+	  <input type="hidden" name="locale_csrf" value="{{.LocaleCSRF}}">
       <label class="sr-only" for="locale">{{t .Locale "locale.label"}}</label>
       <select id="locale" name="locale" data-auto-submit>
         <option value="system" {{if eq .LocalePreference "system"}}selected{{end}}>{{t .Locale "locale.system"}}</option>
@@ -29,6 +29,7 @@
   </header>
   <main class="page-shell">{{template "content" .}}</main>
   <footer class="site-footer"><span>{{.ServerName}}</span><span>{{t .Locale "footer.localFirst"}}</span></footer>
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-dialog-title"><form method="dialog" class="stack"><h2 id="confirm-dialog-title">{{t .Locale "admin.confirmTitle"}}</h2><p id="confirm-dialog-message"></p><div class="actions"><button class="button secondary" value="cancel">{{t .Locale "admin.modalCancel"}}</button><button class="button danger" value="confirm">{{t .Locale "admin.modalConfirm"}}</button></div></form></dialog>
   <script src="/static/app.js" defer></script>
 </body>
 </html>

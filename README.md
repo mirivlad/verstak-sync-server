@@ -230,31 +230,60 @@ The server embeds its public, account, and administrator interface in the Go
 binary. It has no CDN, npm build, external font, or remote analytics
 dependency. `/` is a localized public page; `/login`, `/register`, `/forgot`,
 and `/reset` use post/redirect/get flows. `/dashboard` lets a signed-in user
-review their own devices and revoke one only after entering their password.
+review and search only their own devices, see confirmation state and connection
+times, and revoke one only after entering their password. The reusable layout,
+templates, CSS, JavaScript, and local SVG live below `internal/server/web/` and
+are embedded with `go:embed`; there is no separate frontend build.
 
 `/admin/login` opens the administrator console. Its sidebar provides overview,
-users, devices, vaults, storage, audit, SMTP settings, and diagnostics. User
-blocking is immediate; device revocation and SMTP changes require the current
+users, devices, vaults, storage, audit, SMTP settings, and diagnostics. Lists
+use bounded server-side search, filters, whitelisted sort order, and pagination.
+Administrators can create, edit, confirm, block, reset, and delete users; revoke
+devices; and permanently remove only a previously revoked device. A browser
+password reset generates a random password and exposes it once on a `no-store`
+page; it is never placed in the URL, audit log, cookies, or database plaintext.
+Destructive
+browser actions use the shared local confirmation dialog. Blocking, credential
+changes, device actions, cleanup, and SMTP changes require the current
 administrator password again. Admin HTML is deliberately a normal server
 rendered control plane; the existing `/admin/api/...` endpoints remain for
 automation.
 
 The locale resolver uses the `verstak_locale` HttpOnly/Lax cookie first. Its
 values are `ru`, `en`, or `system`; `system` uses `Accept-Language`, then
-`web.default_locale`, then English. The choice survives login and logout.
-Registration is controlled by `web.allow_registration`; when disabled the
-public registration page does not expose account creation.
+`web.default_locale`, then English. The choice survives login and logout. A
+separate short-lived HttpOnly form token protects the language chooser and all
+anonymous browser POST forms; it is distinct from the server-side session CSRF
+token. Registration is controlled by `web.allow_registration`; when disabled
+the public registration page does not expose account creation.
 
-The admin console also provides bounded user/device/audit lists, a vault detail
-view with aggregates only (never file payloads), safe retention cleanup, and a
-sanitized diagnostics download. General web settings are stored in the existing
-`config.yml`; SMTP passwords are not returned to a browser form.
+The overview reports operational counts and readiness warnings. Vault details
+show only metadata (devices, sequence, operation count, activity, and blob
+usage), never file contents or operation `payload_json`. Diagnostics download
+is sanitized: it excludes paths, tokens, passwords, hashes, and payloads.
+General web settings are stored in the existing `config.yml`; public URL and
+registration policy can be changed there through the console, while transport
+limits remain read-only. SMTP passwords are never returned to a browser form.
 
 All browser mutations use POST and validate a server-side session plus CSRF
-token. The server returns security headers including a restrictive CSP,
+token; anonymous forms use the separate public-form token described above.
+The server returns security headers including a restrictive CSP,
 `frame-ancestors 'none'`, `nosniff`, and a same-origin referrer policy. The
 console must still be deployed behind the HTTPS reverse proxy described below:
 secure cookies are enabled when HTTPS is detected through a trusted proxy.
+
+Run the local interactive browser smoke (Chromium plus Node's built-in
+`undici`; no npm install) with:
+
+```bash
+./scripts/smoke-web.sh
+```
+
+It exercises language switching, admin login/navigation, temporary-user
+creation, block/unblock confirmation, device pairing/revocation, filtering,
+logout, and desktop/mobile screenshots. It starts an isolated temporary server
+and removes its data and screenshots on exit; it is not a reverse-proxy or
+production-deployment test.
 
 Sync operations are generic records with `entity_type`, `entity_id`, `op_type`,
 `payload_json`, `device_id`, and sequencing metadata. A pairing token is bound

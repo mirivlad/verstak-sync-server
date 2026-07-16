@@ -1,2 +1,47 @@
 {{define "admin_settings"}}{{template "layout" .}}{{end}}
-{{define "content"}}<section class="admin-shell"><div class="admin-content"><p class="eyebrow">{{t .Locale "admin.settings"}}</p><h1>{{t .Locale "admin.settings"}}</h1><section class="card panel"><h2>{{t .Locale "admin.general"}}</h2><form method="post" action="/admin/action" class="stack"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="action" value="web-settings"><label>{{t .Locale "admin.serverName"}}<input name="server_name" value="{{.ServerName}}"></label><label>{{t .Locale "locale.label"}}<select name="default_locale"><option value="en" {{if eq .DefaultLocale "en"}}selected{{end}}>English</option><option value="ru" {{if eq .DefaultLocale "ru"}}selected{{end}}>Русский</option></select></label><label><input name="allow_registration" type="checkbox" {{if .AllowRegistration}}checked{{end}}>{{t .Locale "admin.allowRegistration"}}</label><label>{{t .Locale "field.password"}}<input name="password" type="password" required></label><button class="button primary">{{t .Locale "admin.saveUser"}}</button></form></section><section class="card panel"><h2>{{t .Locale "admin.smtpTitle"}}</h2><p class="muted">{{t .Locale "admin.smtpConfigured"}}</p><a class="button secondary" href="/admin/dashboard">{{t .Locale "common.back"}}</a></section></div></section>{{end}}
+{{define "content"}}
+<section class="admin-shell">
+  {{template "admin_nav" .}}
+  <div class="admin-content">
+    <p class="eyebrow">{{t .Locale "admin.settings"}}</p>
+    <h1>{{t .Locale "admin.settings"}}</h1>
+    {{if .Flash}}<p class="flash success" role="status">{{t .Locale .Flash}}</p>{{end}}
+    <section class="card panel">
+      <h2>{{t .Locale "admin.general"}}</h2>
+      <form method="post" action="/admin/action" class="stack">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="action" value="web-settings">
+        <label>{{t .Locale "admin.serverName"}}<input name="server_name" value="{{.ServerName}}"></label>
+		<label>{{t .Locale "admin.publicURL"}}<input name="public_url" type="url" value="{{.PublicURL}}" placeholder="https://sync.example.test"></label>
+        <label>{{t .Locale "locale.label"}}<select name="default_locale"><option value="en" {{if eq .DefaultLocale "en"}}selected{{end}}>English</option><option value="ru" {{if eq .DefaultLocale "ru"}}selected{{end}}>Русский</option></select></label>
+        <label class="check-field"><input name="allow_registration" type="checkbox" {{if .AllowRegistration}}checked{{end}}>{{t .Locale "admin.allowRegistration"}}</label>
+        <label>{{t .Locale "field.password"}}<input name="password" type="password" autocomplete="current-password" required></label>
+        <button class="button primary">{{t .Locale "admin.saveSettings"}}</button>
+      </form>
+    </section>
+	<section class="card panel"><h2>{{t .Locale "admin.network"}}</h2><dl class="details"><dt>{{t .Locale "admin.trustedProxies"}}</dt><dd>{{if .TrustedProxies}}{{.TrustedProxies}}{{else}}—{{end}}</dd></dl></section>
+    <section class="card panel">
+      <h2>{{t .Locale "admin.smtpTitle"}}</h2>
+      <p class="muted">{{t .Locale "admin.smtpConfigured"}}</p>
+      <form method="post" action="/admin/action" class="stack">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="action" value="smtp">
+        <label>{{t .Locale "admin.smtpServer"}}<input name="smtp_host" value="{{.SMTP.Host}}" autocomplete="off"></label>
+        <label>{{t .Locale "admin.smtpPort"}}<input name="smtp_port" inputmode="numeric" value="{{.SMTP.Port}}"></label>
+        <label>{{t .Locale "admin.smtpUsername"}}<input name="smtp_user" value="{{.SMTP.User}}" autocomplete="username"></label>
+        <label>{{t .Locale "admin.smtpPassword"}}<input name="smtp_pass" type="password" autocomplete="new-password"></label>
+        <label>{{t .Locale "admin.smtpType"}}<select name="smtp_security"><option value="none" {{if eq .SMTP.Security "none"}}selected{{end}}>{{t .Locale "admin.smtpNoEncryption"}}</option><option value="starttls" {{if eq .SMTP.Security "starttls"}}selected{{end}}>{{t .Locale "admin.smtpStartTLS"}}</option><option value="tls" {{if eq .SMTP.Security "tls"}}selected{{end}}>{{t .Locale "admin.smtpTLS"}}</option></select></label>
+        <label>{{t .Locale "admin.smtpFrom"}}<input name="smtp_from" type="email" value="{{.SMTP.From}}"></label>
+        <label>{{t .Locale "admin.smtpServerURL"}}<input name="server_url" type="url" value="{{.SMTP.ServerURL}}"></label>
+        <label>{{t .Locale "field.password"}}<input name="password" type="password" autocomplete="current-password" required></label>
+        <button class="button primary" type="submit">{{t .Locale "admin.smtpSave"}}</button>
+      </form>
+      <form method="post" action="/admin/action" class="inline-form top-gap">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="action" value="smtp-test">
+        <label>{{t .Locale "field.email"}}<input name="test_to" type="email" placeholder="{{.SMTP.From}}"></label>
+        <label>{{t .Locale "field.password"}}<input name="password" type="password" autocomplete="current-password" required></label>
+        <button class="button secondary" type="submit">{{t .Locale "admin.smtpTest"}}</button>
+      </form>
+    </section>
+	<section class="card panel"><h2>{{t .Locale "admin.limits"}}</h2><p class="muted">{{t .Locale "admin.readOnlyConfig"}}</p><dl class="details"><dt>{{t .Locale "admin.maxJSONBody"}}</dt><dd>{{webbytes .Limits.MaxJSONBody}}</dd><dt>{{t .Locale "admin.maxPushOperations"}}</dt><dd>{{.Limits.MaxPushOperations}}</dd><dt>{{t .Locale "admin.maxPullPage"}}</dt><dd>{{.Limits.MaxPullPage}}</dd><dt>{{t .Locale "admin.maxBlobBytes"}}</dt><dd>{{webbytes .Limits.MaxBlobBytes}}</dd><dt>{{t .Locale "admin.maxVaultBlobBytes"}}</dt><dd>{{webbytes .Limits.MaxVaultBlobBytes}}</dd><dt>{{t .Locale "admin.maxUserBlobBytes"}}</dt><dd>{{webbytes .Limits.MaxUserBlobBytes}}</dd></dl></section>
+  </div>
+</section>
+{{end}}

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -64,32 +65,64 @@ func (s *Server) blobStorageWritable() bool {
 // ServerStats is intentionally independent from the web UI so a future
 // admin panel can expose operational data without coupling to templates.
 type ServerStats struct {
-	Users          int    `json:"users"`
-	ActiveDevices  int    `json:"active_devices"`
-	RevokedDevices int    `json:"revoked_devices"`
-	Vaults         int    `json:"vaults"`
-	Operations     int    `json:"operations"`
-	DatabaseBytes  int64  `json:"database_bytes"`
-	BlobBytes      int64  `json:"blob_bytes"`
-	LastSyncAt     string `json:"last_sync_activity"`
+	Users            int    `json:"users"`
+	ActiveUsers      int    `json:"active_users"`
+	BlockedUsers     int    `json:"blocked_users"`
+	UnconfirmedUsers int    `json:"unconfirmed_users"`
+	ActiveDevices    int    `json:"active_devices"`
+	RevokedDevices   int    `json:"revoked_devices"`
+	Vaults           int    `json:"vaults"`
+	Operations       int    `json:"operations"`
+	Operations24h    int    `json:"operations_24h"`
+	Blobs            int    `json:"blobs"`
+	BlobReferences   int    `json:"blob_references"`
+	OrphanBlobs      int    `json:"orphan_blobs"`
+	TempUploads      int    `json:"temp_uploads"`
+	ExpiredSessions  int    `json:"expired_sessions"`
+	ExpiredTokens    int    `json:"expired_email_tokens"`
+	AuditEvents      int    `json:"audit_events"`
+	DatabaseBytes    int64  `json:"database_bytes"`
+	BlobBytes        int64  `json:"blob_bytes"`
+	LastSyncAt       string `json:"last_sync_activity"`
+	LastCleanupAt    string `json:"last_cleanup_at"`
 }
 
 func (s *Server) Stats(ctx context.Context) (ServerStats, error) {
 	var stats ServerStats
+	now := time.Now().UTC()
 	queries := []struct {
 		query  string
 		target *int
 	}{
 		{"SELECT COUNT(*) FROM server_users", &stats.Users},
+		{"SELECT COUNT(*) FROM server_users WHERE confirmed=1 AND blocked=0", &stats.ActiveUsers},
+		{"SELECT COUNT(*) FROM server_users WHERE blocked=1", &stats.BlockedUsers},
+		{"SELECT COUNT(*) FROM server_users WHERE confirmed=0", &stats.UnconfirmedUsers},
 		{"SELECT COUNT(*) FROM server_devices WHERE COALESCE(revoked_at, '') = ''", &stats.ActiveDevices},
 		{"SELECT COUNT(*) FROM server_devices WHERE COALESCE(revoked_at, '') != ''", &stats.RevokedDevices},
 		{"SELECT COUNT(DISTINCT user_id || ':' || vault_id) FROM server_devices WHERE COALESCE(user_id,'') != '' AND COALESCE(vault_id,'') != ''", &stats.Vaults},
 		{"SELECT COUNT(*) FROM server_ops", &stats.Operations},
+		{"SELECT COUNT(*) FROM server_blobs", &stats.Blobs},
+		{"SELECT COUNT(*) FROM server_blob_refs", &stats.BlobReferences},
+		{"SELECT COUNT(*) FROM server_blobs b WHERE NOT EXISTS (SELECT 1 FROM server_blob_refs r WHERE r.sha256=b.sha256)", &stats.OrphanBlobs},
+		{"SELECT COUNT(*) FROM server_audit_log", &stats.AuditEvents},
 	}
 	for _, query := range queries {
 		if err := s.db.QueryRowContext(ctx, query.query).Scan(query.target); err != nil {
 			return ServerStats{}, err
 		}
+	}
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM server_ops WHERE created_at >= ?", now.Add(-24*time.Hour).Format(time.RFC3339)).Scan(&stats.Operations24h); err != nil {
+		return ServerStats{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM server_sessions WHERE expires_at <= ?", now.Format(time.RFC3339)).Scan(&stats.ExpiredSessions); err != nil {
+		return ServerStats{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM server_email_tokens WHERE expires_at <= ?", now.Format(time.RFC3339)).Scan(&stats.ExpiredTokens); err != nil {
+		return ServerStats{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(created_at),'') FROM server_audit_log WHERE event_type='retention_cleanup'").Scan(&stats.LastCleanupAt); err != nil {
+		return ServerStats{}, err
 	}
 	if err := s.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(last_seen), '') FROM server_devices").Scan(&stats.LastSyncAt); err != nil {
 		return ServerStats{}, err
@@ -111,6 +144,15 @@ func (s *Server) Stats(ctx context.Context) (ServerStats, error) {
 		return nil
 	}); err != nil && !os.IsNotExist(err) {
 		return ServerStats{}, fmt.Errorf("blob storage stats: %w", err)
+	}
+	if entries, err := os.ReadDir(s.blobsDir); err == nil {
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), ".upload-") {
+				stats.TempUploads++
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return ServerStats{}, fmt.Errorf("temporary upload stats: %w", err)
 	}
 	return stats, nil
 }

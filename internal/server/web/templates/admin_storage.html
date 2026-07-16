@@ -1,0 +1,10 @@
+{{define "admin_storage"}}{{template "layout" .}}{{end}}
+{{define "content"}}
+<section class="admin-shell">{{template "admin_nav" .}}<div class="admin-content">
+  <p class="eyebrow">{{t .Locale "admin.storage"}}</p><h1>{{t .Locale "admin.storage"}}</h1>
+  {{if .Flash}}<p class="flash success" role="status">{{t .Locale .Flash}}</p>{{end}}
+  <div class="stat-grid"><article class="card stat"><strong>{{webbytes .Stats.DatabaseBytes}}</strong><span>{{t .Locale "admin.databaseBytes"}}</span></article><article class="card stat"><strong>{{webbytes .Stats.BlobBytes}}</strong><span>{{.Stats.Blobs}} {{t .Locale "admin.blobBytes"}}</span></article><article class="card stat"><strong>{{.Stats.Operations}}</strong><span>{{t .Locale "admin.operations"}}</span></article></div>
+  <section class="card panel"><dl class="details"><dt>{{t .Locale "admin.blobReferences"}}</dt><dd>{{.Stats.BlobReferences}}</dd><dt>{{t .Locale "admin.orphanBlobs"}}</dt><dd>{{.Stats.OrphanBlobs}}</dd><dt>{{t .Locale "admin.tempUploads"}}</dt><dd>{{.Stats.TempUploads}}</dd><dt>{{t .Locale "admin.expiredSessions"}}</dt><dd>{{.Stats.ExpiredSessions}}</dd><dt>{{t .Locale "admin.expiredTokens"}}</dt><dd>{{.Stats.ExpiredTokens}}</dd><dt>{{t .Locale "admin.lastCleanup"}}</dt><dd>{{webtime .Locale .Stats.LastCleanupAt}}</dd></dl></section>
+  <p class="muted">{{t .Locale "admin.retentionNote"}}</p><form method="post" action="/admin/action" class="inline-form"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="action" value="cleanup"><label class="sr-only">{{t .Locale "field.password"}}</label><input name="password" type="password" autocomplete="current-password" required placeholder="{{t .Locale "field.password"}}"><button class="button secondary" type="submit" data-confirm="{{t .Locale "admin.revokeConfirm"}}">{{t .Locale "admin.runCleanup"}}</button></form>
+</div></section>
+{{end}}

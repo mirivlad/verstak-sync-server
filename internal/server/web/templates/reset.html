@@ -2,5 +2,5 @@
 {{define "content"}}
 <section class="auth-card card"><p class="eyebrow">{{t .Locale "auth.account"}}</p><h1>{{t .Locale "auth.resetTitle"}}</h1>
 {{if .Flash}}<p class="flash error" role="alert">{{t .Locale .Flash}}</p>{{end}}
-<form method="post" action="/reset" class="stack"><input type="hidden" name="token" value="{{.Token}}"><label>{{t .Locale "field.newPassword"}}<input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="256" required autofocus></label><label>{{t .Locale "field.confirmPassword"}}<input name="confirm" type="password" autocomplete="new-password" minlength="8" maxlength="256" required></label><button class="button primary" type="submit">{{t .Locale "auth.savePassword"}}</button></form></section>
+<form method="post" action="/reset" class="stack"><input type="hidden" name="locale_csrf" value="{{.LocaleCSRF}}"><input type="hidden" name="token" value="{{.Token}}"><label>{{t .Locale "field.newPassword"}}<input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="256" required autofocus></label><label>{{t .Locale "field.confirmPassword"}}<input name="confirm" type="password" autocomplete="new-password" minlength="8" maxlength="256" required></label><button class="button primary" type="submit">{{t .Locale "auth.savePassword"}}</button></form></section>
 {{end}}

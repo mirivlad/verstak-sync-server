@@ -37,12 +37,15 @@ func (s *Server) handleUserWebRegister(w http.ResponseWriter, r *http.Request) {
 			s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/register")
 			return
 		}
+		if !s.requirePublicWebMutation(w, r, "/register") {
+			return
+		}
 		username, email, password := strings.TrimSpace(r.FormValue("username")), strings.TrimSpace(r.FormValue("email")), r.FormValue("password")
 		if username == "" || email == "" || password == "" {
 			s.renderPage(w, r, "register", webPage{Title: "auth.registerTitle", Flash: "error.allFieldsRequired"})
 			return
 		}
-		if !s.allowRate(w, r, "register", email) {
+		if !s.allowWebRate(w, r, "register", email, "/register") {
 			return
 		}
 		if err := validatePassword(password); err != "" {
@@ -104,12 +107,15 @@ func (s *Server) handleUserWebForgot(w http.ResponseWriter, r *http.Request) {
 			s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/forgot")
 			return
 		}
+		if !s.requirePublicWebMutation(w, r, "/forgot") {
+			return
+		}
 		email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
 		if email == "" {
 			s.renderPage(w, r, "forgot", webPage{Title: "auth.forgotTitle", Flash: "error.emailRequired"})
 			return
 		}
-		if !s.allowRate(w, r, "forgot", email) {
+		if !s.allowWebRate(w, r, "forgot", email, "/forgot") {
 			return
 		}
 		var userID string
@@ -163,12 +169,15 @@ func (s *Server) handleUserWebReset(w http.ResponseWriter, r *http.Request) {
 			s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/forgot")
 			return
 		}
+		if !s.requirePublicWebMutation(w, r, "/forgot") {
+			return
+		}
 		token, password, confirm := r.FormValue("token"), r.FormValue("password"), r.FormValue("confirm")
 		if token == "" || password == "" || confirm == "" {
 			s.renderPage(w, r, "reset", webPage{Title: "auth.resetTitle", Token: token, Flash: "error.allFieldsRequired"})
 			return
 		}
-		if !s.allowRate(w, r, "reset", "") {
+		if !s.allowWebRate(w, r, "reset", "", "/forgot") {
 			return
 		}
 		if err := validatePassword(password); err != "" {
@@ -205,8 +214,11 @@ func (s *Server) handleUserWebLogin(w http.ResponseWriter, r *http.Request) {
 			s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/login")
 			return
 		}
+		if !s.requirePublicWebMutation(w, r, "/login") {
+			return
+		}
 		login, password := strings.TrimSpace(r.FormValue("username")), r.FormValue("password")
-		if !s.allowRate(w, r, "login", login) {
+		if !s.allowWebRate(w, r, "login", login, "/login") {
 			return
 		}
 		var userID, hash string
@@ -239,11 +251,20 @@ func (s *Server) handleUserDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var username, email string
-	if err := s.db.QueryRow("SELECT username, email FROM server_users WHERE id=?", userID).Scan(&username, &email); err != nil {
+	var confirmed int
+	if err := s.db.QueryRow("SELECT username, email, confirmed FROM server_users WHERE id=?", userID).Scan(&username, &email, &confirmed); err != nil {
 		s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/")
 		return
 	}
-	rows, err := s.db.Query(`SELECT d.id, d.name, COALESCE(d.vault_id,''), COALESCE(d.client_version,''), COALESCE(d.last_seen,''), COALESCE(d.revoked_at,''), d.created_at FROM server_devices d JOIN server_user_devices ud ON ud.device_id=d.id WHERE ud.user_id=? ORDER BY d.created_at DESC`, userID)
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	where := " WHERE ud.user_id=?"
+	args := []interface{}{userID}
+	if query != "" {
+		like := "%" + query + "%"
+		where += " AND (d.name LIKE ? OR d.vault_id LIKE ? OR d.client_version LIKE ?)"
+		args = append(args, like, like, like)
+	}
+	rows, err := s.db.Query(`SELECT d.id, d.name, COALESCE(d.vault_id,''), COALESCE(d.client_version,''), COALESCE(d.last_seen,''), COALESCE(d.revoked_at,''), d.created_at FROM server_devices d JOIN server_user_devices ud ON ud.device_id=d.id`+where+` ORDER BY d.created_at DESC`, args...)
 	if err != nil {
 		s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/")
 		return
@@ -267,11 +288,16 @@ func (s *Server) handleUserDashboard(w http.ResponseWriter, r *http.Request) {
 		s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/")
 		return
 	}
-	flash := r.URL.Query().Get("error")
-	if flash != "error.invalidCredentials" {
+	flash := r.URL.Query().Get("flash")
+	flashError := false
+	if flash == "" {
+		flash = r.URL.Query().Get("error")
+		flashError = flash != ""
+	}
+	if flash != "error.invalidCredentials" && flash != "user.deviceRevoked" {
 		flash = ""
 	}
-	s.renderPage(w, r, "dashboard", webPage{Title: "user.account", UserName: username, Email: email, Devices: devices, Flash: flash})
+	s.renderPage(w, r, "dashboard", webPage{Title: "user.account", UserName: username, Email: email, UserConfirmed: confirmed != 0, Devices: devices, Flash: flash, FlashError: flashError, List: webList{Query: query}})
 }
 
 func (s *Server) handleUserWebLogout(w http.ResponseWriter, r *http.Request) {
@@ -353,10 +379,19 @@ func (s *Server) handleUserWebDeviceAction(w http.ResponseWriter, r *http.Reques
 		}
 		password = req.Password
 	}
-	if password == "" || !s.allowRate(w, r, "auth-test", session.SubjectID) {
-		if password == "" {
+	if password == "" {
+		if formRequest {
+			http.Redirect(w, r, "/dashboard?error=error.invalidCredentials", http.StatusSeeOther)
+		} else {
 			jsonErrCode(w, http.StatusBadRequest, "invalid_request", "password required")
 		}
+		return
+	}
+	if formRequest {
+		if !s.allowWebRate(w, r, "auth-test", session.SubjectID, "/dashboard") {
+			return
+		}
+	} else if !s.allowRate(w, r, "auth-test", session.SubjectID) {
 		return
 	}
 	var hash string
@@ -387,7 +422,7 @@ func (s *Server) handleUserWebDeviceAction(w http.ResponseWriter, r *http.Reques
 	}
 	s.auditLog("device_revoked", session.SubjectID, deviceID, s.clientIP(r), "device revoked from web dashboard")
 	if formRequest {
-		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+		http.Redirect(w, r, "/dashboard?flash=user.deviceRevoked", http.StatusSeeOther)
 		return
 	}
 	jsonOK(w, map[string]string{"status": "revoked"})

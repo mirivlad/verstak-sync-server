@@ -1,11 +1,15 @@
 package server
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 )
 
-const webLocaleCookieName = "verstak_locale"
+const (
+	webLocaleCookieName     = "verstak_locale"
+	webLocaleCSRFCookieName = "verstak_locale_csrf"
+)
 
 func isSupportedWebLocale(locale string) bool {
 	return locale == "en" || locale == "ru"
@@ -68,4 +72,39 @@ func (s *Server) setWebLocale(w http.ResponseWriter, r *http.Request, locale str
 		Name: webLocaleCookieName, Value: locale, Path: "/", HttpOnly: true,
 		Secure: secure, SameSite: http.SameSiteLaxMode, MaxAge: 365 * 24 * 60 * 60,
 	})
+}
+
+// webLocaleCSRF protects the public language-preference form without
+// conflating it with session CSRF tokens. Its value is rendered by the server,
+// while the matching cookie is HttpOnly and never read by client-side code.
+func (s *Server) webLocaleCSRF(w http.ResponseWriter, r *http.Request) string {
+	if cookie, err := r.Cookie(webLocaleCSRFCookieName); err == nil && cookie.Value != "" {
+		return cookie.Value
+	}
+	token, err := randomSecret(32)
+	if err != nil {
+		return ""
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: webLocaleCSRFCookieName, Value: token, Path: "/", HttpOnly: true,
+		Secure: s.requestIsHTTPS(r), SameSite: http.SameSiteStrictMode, MaxAge: 24 * 60 * 60,
+	})
+	return token
+}
+
+func (s *Server) verifyWebLocaleCSRF(r *http.Request) bool {
+	cookie, err := r.Cookie(webLocaleCSRFCookieName)
+	if err != nil || cookie.Value == "" || !s.sameOrigin(r) {
+		return false
+	}
+	candidate := r.FormValue("locale_csrf")
+	return candidate != "" && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(candidate)) == 1
+}
+
+func (s *Server) requirePublicWebMutation(w http.ResponseWriter, r *http.Request, back string) bool {
+	if s.verifyWebLocaleCSRF(r) {
+		return true
+	}
+	s.renderWebError(w, r, http.StatusForbidden, "error.tryAgain", back)
+	return false
 }

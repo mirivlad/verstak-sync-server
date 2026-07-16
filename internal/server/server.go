@@ -8,20 +8,23 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
 type Server struct {
-	db        *sql.DB
-	dbPath    string
-	cfg       *Config
-	blobsDir  string
-	mux       *http.ServeMux
-	limiter   *rateLimiter
-	web       *webRenderer
-	startedAt time.Time
+	db         *sql.DB
+	dbPath     string
+	cfg        *Config
+	blobsDir   string
+	mux        *http.ServeMux
+	limiter    *rateLimiter
+	web        *webRenderer
+	startedAt  time.Time
+	secretMu   sync.Mutex
+	webSecrets map[string]oneTimeWebSecret
 }
 
 // Version and BuildCommit are assigned through -ldflags during release builds.
@@ -89,13 +92,14 @@ func NewServer(dbPath, dataDir string, cfg *Config) (*Server, error) {
 		return nil, fmt.Errorf("web templates: %w", err)
 	}
 	s := &Server{
-		db:        db,
-		dbPath:    dbPath,
-		cfg:       cfg,
-		blobsDir:  blobsDir,
-		limiter:   newRateLimiter(nil),
-		web:       web,
-		startedAt: time.Now().UTC(),
+		db:         db,
+		dbPath:     dbPath,
+		cfg:        cfg,
+		blobsDir:   blobsDir,
+		limiter:    newRateLimiter(nil),
+		web:        web,
+		startedAt:  time.Now().UTC(),
+		webSecrets: make(map[string]oneTimeWebSecret),
 	}
 	s.mux = http.NewServeMux()
 	return s, nil

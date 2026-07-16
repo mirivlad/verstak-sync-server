@@ -21,6 +21,16 @@ func TestResolveWebLocaleCookieOverridesSystemAcceptLanguage(t *testing.T) {
 	}
 }
 
+func TestFormatWebTimeUsesSelectedLocale(t *testing.T) {
+	stamp := "2026-07-17T13:45:00Z"
+	if got := formatWebTime("ru", stamp); !strings.Contains(got, "17.07.2026") {
+		t.Fatalf("Russian timestamp = %q", got)
+	}
+	if got := formatWebTime("en", stamp); !strings.Contains(got, "Jul 17, 2026") {
+		t.Fatalf("English timestamp = %q", got)
+	}
+}
+
 func TestTranslationCatalogsHaveMatchingKeysAndHideUnknownKeys(test *testing.T) {
 	for key := range _translations["en"] {
 		if _, ok := _translations["ru"][key]; !ok {
@@ -53,6 +63,20 @@ func TestEmbeddedTemplatesUseExternalAssetsAndNoInlineEventHandlers(t *testing.T
 				t.Fatalf("%s contains forbidden inline asset/handler %q", name, forbidden)
 			}
 		}
+	}
+}
+
+func TestConfirmationUsesLocalDialogInsteadOfBrowserPrompt(t *testing.T) {
+	layout, err := webFS.ReadFile("web/templates/layout.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := webFS.ReadFile("web/static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(layout), `id="confirm-dialog"`) || !strings.Contains(string(script), ".showModal()") || strings.Contains(string(script), "window.confirm") {
+		t.Fatalf("local confirmation dialog is missing or browser prompt remains")
 	}
 }
 
@@ -102,6 +126,22 @@ func TestPublicHomeUsesSharedLocalizedTemplateLayout(t *testing.T) {
 	}
 }
 
+func TestPublicHomeUsesUnavailablePageWhenReadinessFails(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetupRoutes()
+	if err := s.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	res := httptest.NewRecorder()
+	s.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/", nil))
+	if res.Code != http.StatusServiceUnavailable || !strings.Contains(res.Body.String(), `<html lang="en">`) {
+		t.Fatalf("unavailable page=%d: %s", res.Code, res.Body.String())
+	}
+}
+
 func TestPublicTemplateRoutesRenderInBothLocales(t *testing.T) {
 	s, err := newTestServer(t)
 	if err != nil {
@@ -120,6 +160,39 @@ func TestPublicTemplateRoutesRenderInBothLocales(t *testing.T) {
 			}
 			if !strings.Contains(res.Body.String(), `<html lang="`+locale+`">`) {
 				t.Fatalf("%s %s has wrong document language", locale, path)
+			}
+		}
+	}
+}
+
+func TestAdminPagesRenderWithActiveNavigationInBothLocales(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetupRoutes()
+	if _, err := s.db.Exec("INSERT INTO server_users (id,username,email,password_hash,confirmed,created_at) VALUES ('u1','alice','alice@example.test','hash',1,'2026-01-01T00:00:00Z')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("INSERT INTO server_devices (id,name,api_key,user_id,vault_id,created_at) VALUES ('d1','Laptop','legacy','u1','vault-a','2026-01-01T00:00:00Z')"); err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := s.createSession(sessionScopeAdmin, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, locale := range []string{"ru", "en"} {
+		for _, tc := range []struct{ path, active string }{
+			{"/admin/dashboard", "/admin/dashboard"}, {"/admin/users", "/admin/users"}, {"/admin/devices", "/admin/devices"}, {"/admin/vaults", "/admin/vaults"}, {"/admin/vault/?user=u1&vault=vault-a", "/admin/vaults"}, {"/admin/storage", "/admin/storage"}, {"/admin/audit", "/admin/audit"}, {"/admin/settings", "/admin/settings"}, {"/admin/diagnostics", "/admin/diagnostics"},
+		} {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req.AddCookie(&http.Cookie{Name: "admin_session", Value: token})
+			req.AddCookie(&http.Cookie{Name: webLocaleCookieName, Value: locale})
+			res := httptest.NewRecorder()
+			s.Handler().ServeHTTP(res, req)
+			if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `<html lang="`+locale+`">`) || !strings.Contains(res.Body.String(), `href="`+tc.active+`" aria-current="page"`) {
+				t.Fatalf("%s %s = %d; active navigation missing: %s", locale, tc.path, res.Code, res.Body.String())
 			}
 		}
 	}
@@ -223,8 +296,9 @@ func TestLocaleSelectionUsesCookieAndPRG(t *testing.T) {
 	}
 	defer s.Close()
 	s.SetupRoutes()
-	req := httptest.NewRequest(http.MethodPost, "/locale", strings.NewReader("locale=ru&from=/login"))
+	req := httptest.NewRequest(http.MethodPost, "/locale", strings.NewReader("locale=ru&from=/login&locale_csrf=locale-test-token"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: webLocaleCSRFCookieName, Value: "locale-test-token"})
 	res := httptest.NewRecorder()
 	s.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusSeeOther || res.Header().Get("Location") != "/login" {
@@ -243,12 +317,59 @@ func TestLocaleSelectionPreservesResetQuery(t *testing.T) {
 	}
 	defer s.Close()
 	s.SetupRoutes()
-	req := httptest.NewRequest(http.MethodPost, "/locale", strings.NewReader("locale=ru&from=/reset%3Ftoken%3Dopaque-token"))
+	req := httptest.NewRequest(http.MethodPost, "/locale", strings.NewReader("locale=ru&from=/reset%3Ftoken%3Dopaque-token&locale_csrf=locale-test-token"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: webLocaleCSRFCookieName, Value: "locale-test-token"})
 	res := httptest.NewRecorder()
 	s.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusSeeOther || res.Header().Get("Location") != "/reset?token=opaque-token" {
 		t.Fatalf("locale redirect=%d %q", res.Code, res.Header().Get("Location"))
+	}
+}
+
+func TestLocaleSelectionRejectsMissingOrMismatchedCSRF(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetupRoutes()
+	for _, tc := range []struct {
+		name, body, cookie string
+	}{
+		{"missing", "locale=ru&from=/login", ""},
+		{"mismatched", "locale=ru&from=/login&locale_csrf=other", "locale-test-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/locale", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			if tc.cookie != "" {
+				req.AddCookie(&http.Cookie{Name: webLocaleCSRFCookieName, Value: tc.cookie})
+			}
+			res := httptest.NewRecorder()
+			s.Handler().ServeHTTP(res, req)
+			if res.Code != http.StatusForbidden {
+				t.Fatalf("locale CSRF status=%d, want 403", res.Code)
+			}
+		})
+	}
+}
+
+func TestPublicWebFormsRejectMissingCSRF(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetupRoutes()
+	for _, path := range []string{"/register", "/login", "/forgot", "/reset", "/admin/login"} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("username=alice&email=alice%40example.test&password=password&confirm=password"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		res := httptest.NewRecorder()
+		s.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusForbidden {
+			t.Fatalf("%s without public CSRF = %d, want 403", path, res.Code)
+		}
 	}
 }
 
@@ -346,6 +467,198 @@ func TestAdminUserListSearchStatusAndPagination(t *testing.T) {
 	}
 	if list.Total != 1 || len(items) != 1 || !items[0].Blocked {
 		t.Fatalf("status filter: list=%+v items=%+v", list, items)
+	}
+}
+
+func TestAdminSettingsRendersAndSavesSMTPConfiguration(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.cfg.SetAdmin("admin", "correct horse battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	s.SetupRoutes()
+	token, csrf, err := s.createSession(sessionScopeAdmin, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	get := httptest.NewRequest(http.MethodGet, "/admin/settings", nil)
+	get.AddCookie(&http.Cookie{Name: "admin_session", Value: token})
+	get.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+	getResult := httptest.NewRecorder()
+	s.Handler().ServeHTTP(getResult, get)
+	if getResult.Code != http.StatusOK {
+		t.Fatalf("settings page = %d: %s", getResult.Code, getResult.Body.String())
+	}
+	for _, field := range []string{"smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_security", "smtp_from", "server_url"} {
+		if !strings.Contains(getResult.Body.String(), `name="`+field+`"`) {
+			t.Fatalf("settings page is missing SMTP field %q: %s", field, getResult.Body.String())
+		}
+	}
+
+	body := "csrf_token=" + csrf + "&action=smtp&smtp_host=mail.example.test&smtp_port=587&smtp_user=mailer&smtp_pass=mail-secret&smtp_security=starttls&smtp_from=sync%40example.test&server_url=https%3A%2F%2Fsync.example.test&password=correct+horse+battery+staple"
+	post := httptest.NewRequest(http.MethodPost, "/admin/action", strings.NewReader(body))
+	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	post.AddCookie(&http.Cookie{Name: "admin_session", Value: token})
+	post.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+	postResult := httptest.NewRecorder()
+	s.Handler().ServeHTTP(postResult, post)
+	if postResult.Code != http.StatusSeeOther || postResult.Header().Get("Location") != "/admin/settings?flash=smtp_saved" {
+		t.Fatalf("save SMTP = %d %q: %s", postResult.Code, postResult.Header().Get("Location"), postResult.Body.String())
+	}
+	if got := s.smtpGet("smtp_host"); got != "mail.example.test" {
+		t.Fatalf("saved SMTP host = %q", got)
+	}
+}
+
+func TestUserDashboardOnlyRendersOwnFilteredDevices(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetupRoutes()
+	for _, user := range []struct{ id, name string }{{"user-a", "alice"}, {"user-b", "bob"}} {
+		if _, err := s.db.Exec("INSERT INTO server_users (id,username,email,password_hash,confirmed,created_at) VALUES (?, ?, ?, 'hash', 1, '2026-01-01T00:00:00Z')", user.id, user.name, user.name+"@example.test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, device := range []struct{ id, user, name string }{{"device-a", "user-a", "Alice laptop"}, {"device-b", "user-b", "Bob workstation"}} {
+		if _, err := s.db.Exec("INSERT INTO server_devices (id,name,api_key,user_id,vault_id,created_at) VALUES (?, ?, ?, ?, 'vault', '2026-01-01T00:00:00Z')", device.id, device.name, "key-"+device.id, device.user); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.Exec("INSERT INTO server_user_devices (user_id,device_id) VALUES (?,?)", device.user, device.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	token, _, err := s.createSession(sessionScopeUser, "user-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/dashboard?q=Alice", nil)
+	req.AddCookie(&http.Cookie{Name: "user_session", Value: token})
+	res := httptest.NewRecorder()
+	s.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("dashboard=%d: %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "Alice laptop") || strings.Contains(res.Body.String(), "Bob workstation") {
+		t.Fatalf("dashboard leaked or missed device: %s", res.Body.String())
+	}
+}
+
+func TestAdminDeviceFiltersAndAuditSearchRemainBounded(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, user := range []struct{ id, name string }{{"u1", "alice"}, {"u2", "bob"}} {
+		if _, err := s.db.Exec("INSERT INTO server_users (id,username,email,password_hash,confirmed,created_at) VALUES (?, ?, ?, 'hash', 1, '2026-01-01T00:00:00Z')", user.id, user.name, user.name+"@example.test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, device := range []struct{ id, user, vault, version string }{{"d1", "u1", "vault-a", "2.0"}, {"d2", "u2", "vault-b", "1.0"}} {
+		if _, err := s.db.Exec("INSERT INTO server_devices (id,name,api_key,user_id,vault_id,client_version,created_at) VALUES (?, ?, ?, ?, ?, ?, '2026-01-01T00:00:00Z')", device.id, device.id, "key-"+device.id, device.user, device.vault, device.version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	devices, list, err := s.webAdminDevices(webList{User: "alice", Vault: "vault-a", Version: "2.0", Sort: "name", Page: 1, PerPage: 25})
+	if err != nil || len(devices) != 1 || devices[0].ID != "d1" || list.Sort != "name" {
+		t.Fatalf("filtered devices=%+v list=%+v err=%v", devices, list, err)
+	}
+	if _, err := s.db.Exec("INSERT INTO server_audit_log (event_type,user_id,message,created_at) VALUES ('device_paired','u1','safe','2026-01-01T00:00:00Z')"); err != nil {
+		t.Fatal(err)
+	}
+	audit, _, err := s.webAudit(webList{Event: "' OR 1=1 --", Page: 1, PerPage: 25})
+	if err != nil || len(audit) != 0 {
+		t.Fatalf("audit injection filter returned=%+v err=%v", audit, err)
+	}
+}
+
+func TestAdminCanConfirmUnconfirmedUserWithCSRFAndReauth(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.cfg.SetAdmin("admin", "correct horse battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	s.SetupRoutes()
+	if _, err := s.db.Exec("INSERT INTO server_users (id,username,email,password_hash,confirmed,created_at) VALUES ('u1','alice','alice@example.test','hash',0,'2026-01-01T00:00:00Z')"); err != nil {
+		t.Fatal(err)
+	}
+	token, csrf, err := s.createSession(sessionScopeAdmin, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := "csrf_token=" + csrf + "&action=confirm-user&id=u1&password=correct+horse+battery+staple"
+	req := httptest.NewRequest(http.MethodPost, "/admin/action", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: token})
+	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+	res := httptest.NewRecorder()
+	s.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusSeeOther || res.Header().Get("Location") != "/admin/users" {
+		t.Fatalf("confirm user=%d %q: %s", res.Code, res.Header().Get("Location"), res.Body.String())
+	}
+	var confirmed int
+	if err := s.db.QueryRow("SELECT confirmed FROM server_users WHERE id='u1'").Scan(&confirmed); err != nil || confirmed != 1 {
+		t.Fatalf("confirmed=%d err=%v", confirmed, err)
+	}
+}
+
+func TestAdminPasswordResetShowsGeneratedSecretOnce(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.cfg.SetAdmin("admin", "correct horse battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	s.SetupRoutes()
+	if _, err := s.db.Exec("INSERT INTO server_users (id,username,email,password_hash,confirmed,created_at) VALUES ('u1','alice','alice@example.test','old',1,'2026-01-01T00:00:00Z')"); err != nil {
+		t.Fatal(err)
+	}
+	adminToken, csrf, err := s.createSession(sessionScopeAdmin, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.createSession(sessionScopeUser, "u1"); err != nil {
+		t.Fatal(err)
+	}
+	body := "csrf_token=" + csrf + "&action=reset-user-password&id=u1&password=correct+horse+battery+staple"
+	request := httptest.NewRequest(http.MethodPost, "/admin/action", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(&http.Cookie{Name: "admin_session", Value: adminToken})
+	request.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+	response := httptest.NewRecorder()
+	s.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/admin/password-result" {
+		t.Fatalf("reset=%d %q: %s", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+	var sessions int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM server_sessions WHERE scope='user' AND subject_id='u1'").Scan(&sessions); err != nil || sessions != 0 {
+		t.Fatalf("user sessions=%d err=%v", sessions, err)
+	}
+	resultRequest := httptest.NewRequest(http.MethodGet, "/admin/password-result", nil)
+	resultRequest.AddCookie(&http.Cookie{Name: "admin_session", Value: adminToken})
+	resultResponse := httptest.NewRecorder()
+	s.Handler().ServeHTTP(resultResponse, resultRequest)
+	if resultResponse.Code != http.StatusOK || !strings.Contains(resultResponse.Header().Get("Cache-Control"), "no-store") || !strings.Contains(resultResponse.Body.String(), "one-time-secret") {
+		t.Fatalf("password result=%d headers=%v body=%s", resultResponse.Code, resultResponse.Header(), resultResponse.Body.String())
+	}
+	secondRequest := httptest.NewRequest(http.MethodGet, "/admin/password-result", nil)
+	secondRequest.AddCookie(&http.Cookie{Name: "admin_session", Value: adminToken})
+	secondResponse := httptest.NewRecorder()
+	s.Handler().ServeHTTP(secondResponse, secondRequest)
+	if secondResponse.Code != http.StatusSeeOther || secondResponse.Header().Get("Location") != "/admin/users" {
+		t.Fatalf("second password result=%d %q", secondResponse.Code, secondResponse.Header().Get("Location"))
 	}
 }
 
