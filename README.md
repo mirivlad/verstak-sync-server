@@ -7,8 +7,8 @@ Standalone sync server for Verstak2 platform.
 This server provides synchronization between devices running Verstak2. It handles:
 
 - Device registration and authentication
-- Vault-scoped operation log sync with server sequence numbers and conflict detection
-- Blob storage for attachments
+- Vault-scoped, ordered operation-log relay with server sequence numbers
+- Optional blob endpoints, not used by the current bounded Desktop file sync
 - User management with email confirmation
 
 ## Quick Start
@@ -108,8 +108,9 @@ sudo install -m 755 ./build/bin/verstak-sync-server /opt/verstak-sync-server/ver
 sudo systemctl start verstak-server
 ```
 
-Keep `--data` stable across upgrades. The data directory is the server's source
-of truth.
+Keep `--data` stable across upgrades. The data directory is the durable relay
+log for connected devices; each Desktop vault remains the source of truth for
+its local-first files and workspace state.
 
 ## Backup And Restore
 
@@ -192,7 +193,18 @@ Sync operations are generic records with `entity_type`, `entity_id`, `op_type`,
 to one user and vault. The server derives the stored device ID and operation
 scope from that token, ignores a caller-supplied `device_id` for authorization,
 and returns only operations and cursors from the authenticated user/vault.
-Verstak desktop owns the v2 payload semantics.
+Operations are returned in increasing `server_sequence`; clients must stop at
+the first operation they cannot apply and retry that sequence later. The server
+does not merge files, resolve conflicts, or create replacement names.
+
+The desktop pairing payload may supply an existing `vault_id` to add a new
+empty local vault to that remote scope. The server treats that value only as a
+scope selector: reconciliation, conflict detection, snapshots, and durable
+workspace identity remain Desktop-core responsibilities. Current Desktop core
+uses bounded inline file payloads (text or base64 up to 8 MB) and workspace
+operations (`create`, `rename`, `trash`, `restore`). Blob transport, quotas,
+pull pagination, and operation retention are a later milestone; the existing
+blob endpoints must not be interpreted as enabled Desktop large-file sync.
 
 New device enrollment requires a non-empty `vault_id`. The `legacy:` prefix is
 reserved for server-side migration of older records and cannot be selected by
