@@ -3,7 +3,6 @@ package server
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"html"
 	"log"
 	"net/http"
 	"strings"
@@ -82,11 +81,11 @@ func (s *Server) handleConfirm(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		tokenStr := r.URL.Query().Get("token")
 		if tokenStr == "" {
-			jsonErrCode(w, http.StatusBadRequest, "invalid_request", "token required")
+			s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/login")
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(`<form method="POST"><input type="hidden" name="token" value="` + html.EscapeString(tokenStr) + `"><button>Confirm email</button></form>`))
+		w.Header().Set("Cache-Control", "no-store")
+		s.renderPage(w, r, "confirm", webPage{Title: "confirm.title", Token: tokenStr})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -109,19 +108,31 @@ func (s *Server) handleConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if tokenStr == "" {
-		jsonErr(w, 400, "token required")
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+			jsonErr(w, 400, "token required")
+		} else {
+			s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/login")
+		}
 		return
 	}
 	var userID, expiresAt string
 	err := s.db.QueryRow("SELECT user_id, expires_at FROM server_email_tokens WHERE token_hash=? AND purpose='confirm'",
 		emailTokenHash(tokenStr)).Scan(&userID, &expiresAt)
 	if err != nil {
-		jsonErr(w, 400, "invalid or expired token")
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+			jsonErr(w, 400, "invalid or expired token")
+		} else {
+			s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/login")
+		}
 		return
 	}
 	exp, err := time.Parse(time.RFC3339, expiresAt)
 	if err != nil || time.Now().After(exp) {
-		jsonErr(w, 400, "token expired")
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+			jsonErr(w, 400, "token expired")
+		} else {
+			s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/login")
+		}
 		return
 	}
 	tx, err := s.db.Begin()
@@ -143,7 +154,11 @@ func (s *Server) handleConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("confirm: user %s confirmed email", userID)
-	jsonOK(w, map[string]string{"status": "confirmed"})
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		jsonOK(w, map[string]string{"status": "confirmed"})
+	} else {
+		http.Redirect(w, r, "/confirm/result", http.StatusSeeOther)
+	}
 }
 
 func (s *Server) handleUserLogin(w http.ResponseWriter, r *http.Request) {

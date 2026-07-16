@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,13 +97,16 @@ func (s *Server) handleAdminWeb(w http.ResponseWriter, r *http.Request) {
 	data := webPage{Title: "admin." + page, Admin: true, AdminPage: page, Stats: stats, Health: s.healthStatus(r.Context())}
 	switch page {
 	case "users":
-		data.AdminUsers, err = s.webAdminUsers()
+		data.List = webListFromRequest(r)
+		data.AdminUsers, data.List, err = s.webAdminUsers(data.List)
 	case "devices":
-		data.AdminDevices, err = s.webAdminDevices()
+		data.List = webListFromRequest(r)
+		data.AdminDevices, data.List, err = s.webAdminDevices(data.List)
 	case "vaults":
 		data.Vaults, err = s.webVaults()
 	case "audit":
-		data.Audit, err = s.webAudit()
+		data.List = webListFromRequest(r)
+		data.Audit, data.List, err = s.webAudit(data.List)
 	case "settings":
 		data.SMTP = s.webSMTP()
 	}
@@ -114,10 +118,61 @@ func (s *Server) handleAdminWeb(w http.ResponseWriter, r *http.Request) {
 	s.renderPage(w, r, "admin", data)
 }
 
-func (s *Server) webAdminUsers() ([]webAdminUser, error) {
-	rows, err := s.db.Query(`SELECT u.id,u.username,u.email,u.confirmed,u.blocked,u.created_at,COALESCE(u.last_seen,''),COUNT(ud.device_id) FROM server_users u LEFT JOIN server_user_devices ud ON ud.user_id=u.id GROUP BY u.id ORDER BY u.created_at DESC`)
+func webListFromRequest(r *http.Request) webList {
+	list := webList{Query: strings.TrimSpace(r.URL.Query().Get("q")), Status: strings.TrimSpace(r.URL.Query().Get("status")), Page: 1, PerPage: 25}
+	if value, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && value > 0 {
+		list.Page = value
+	}
+	if value, err := strconv.Atoi(r.URL.Query().Get("per_page")); err == nil && value > 0 && value <= 100 {
+		list.PerPage = value
+	}
+	return list
+}
+
+func finishWebList(list webList, total int) webList {
+	list.Total = total
+	list.Pages = (total + list.PerPage - 1) / list.PerPage
+	if list.Pages == 0 {
+		list.Pages = 1
+	}
+	if list.Page > list.Pages {
+		list.Page = list.Pages
+	}
+	if list.Page > 1 {
+		list.Previous = list.Page - 1
+	}
+	if list.Page < list.Pages {
+		list.Next = list.Page + 1
+	}
+	return list
+}
+
+func (s *Server) webAdminUsers(list webList) ([]webAdminUser, webList, error) {
+	where := ""
+	args := []interface{}{}
+	if list.Query != "" {
+		where = " WHERE (u.username LIKE ? OR u.email LIKE ?)"
+		like := "%" + list.Query + "%"
+		args = append(args, like, like)
+	}
+	if list.Status == "active" || list.Status == "blocked" || list.Status == "unconfirmed" {
+		condition := map[string]string{"active": "u.confirmed=1 AND u.blocked=0", "blocked": "u.blocked=1", "unconfirmed": "u.confirmed=0"}[list.Status]
+		if where == "" {
+			where = " WHERE " + condition
+		} else {
+			where += " AND " + condition
+		}
+	}
+	var total int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM server_users u"+where, args...).Scan(&total); err != nil {
+		return nil, list, err
+	}
+	list = finishWebList(list, total)
+	queryArgs := append([]interface{}{}, args...)
+	queryArgs = append(queryArgs, list.PerPage, (list.Page-1)*list.PerPage)
+	rows, err := s.db.Query(`SELECT u.id,u.username,u.email,u.confirmed,u.blocked,u.created_at,COALESCE(u.last_seen,''),COUNT(ud.device_id) FROM server_users u LEFT JOIN server_user_devices ud ON ud.user_id=u.id`+where+` GROUP BY u.id ORDER BY u.created_at DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
-		return nil, err
+		return nil, list, err
 	}
 	defer rows.Close()
 	var out []webAdminUser
@@ -125,19 +180,41 @@ func (s *Server) webAdminUsers() ([]webAdminUser, error) {
 		var u webAdminUser
 		var confirmed, blocked int
 		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &confirmed, &blocked, &u.CreatedAt, &u.LastSeen, &u.Devices); err != nil {
-			return nil, err
+			return nil, list, err
 		}
 		u.Confirmed = confirmed != 0
 		u.Blocked = blocked != 0
 		out = append(out, u)
 	}
-	return out, rows.Err()
+	return out, list, rows.Err()
 }
 
-func (s *Server) webAdminDevices() ([]webAdminDevice, error) {
-	rows, err := s.db.Query(`SELECT d.id,d.name,COALESCE(u.username,''),COALESCE(d.vault_id,''),COALESCE(d.client_version,''),COALESCE(d.last_seen,''),COALESCE(d.revoked_at,''),d.created_at FROM server_devices d LEFT JOIN server_users u ON u.id=d.user_id ORDER BY d.created_at DESC`)
+func (s *Server) webAdminDevices(list webList) ([]webAdminDevice, webList, error) {
+	where := ""
+	args := []interface{}{}
+	if list.Query != "" {
+		where = " WHERE (d.name LIKE ? OR u.username LIKE ? OR d.vault_id LIKE ?)"
+		like := "%" + list.Query + "%"
+		args = append(args, like, like, like)
+	}
+	if list.Status == "active" || list.Status == "revoked" {
+		condition := map[string]string{"active": "COALESCE(d.revoked_at,'')=''", "revoked": "COALESCE(d.revoked_at,'')!=''"}[list.Status]
+		if where == "" {
+			where = " WHERE " + condition
+		} else {
+			where += " AND " + condition
+		}
+	}
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM server_devices d LEFT JOIN server_users u ON u.id=d.user_id`+where, args...).Scan(&total); err != nil {
+		return nil, list, err
+	}
+	list = finishWebList(list, total)
+	queryArgs := append([]interface{}{}, args...)
+	queryArgs = append(queryArgs, list.PerPage, (list.Page-1)*list.PerPage)
+	rows, err := s.db.Query(`SELECT d.id,d.name,COALESCE(u.username,''),COALESCE(d.vault_id,''),COALESCE(d.client_version,''),COALESCE(d.last_seen,''),COALESCE(d.revoked_at,''),d.created_at FROM server_devices d LEFT JOIN server_users u ON u.id=d.user_id`+where+` ORDER BY d.created_at DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
-		return nil, err
+		return nil, list, err
 	}
 	defer rows.Close()
 	var out []webAdminDevice
@@ -145,7 +222,7 @@ func (s *Server) webAdminDevices() ([]webAdminDevice, error) {
 		var d webAdminDevice
 		var revoked string
 		if err := rows.Scan(&d.ID, &d.Name, &d.User, &d.Vault, &d.Version, &d.LastSeen, &revoked, &d.CreatedAt); err != nil {
-			return nil, err
+			return nil, list, err
 		}
 		d.Revoked = revoked != ""
 		if d.LastSeen == "" {
@@ -153,7 +230,7 @@ func (s *Server) webAdminDevices() ([]webAdminDevice, error) {
 		}
 		out = append(out, d)
 	}
-	return out, rows.Err()
+	return out, list, rows.Err()
 }
 
 func (s *Server) webVaults() ([]webVault, error) {
@@ -173,21 +250,35 @@ func (s *Server) webVaults() ([]webVault, error) {
 	return out, rows.Err()
 }
 
-func (s *Server) webAudit() ([]webAudit, error) {
-	rows, err := s.db.Query(`SELECT event_type,COALESCE(user_id,''),COALESCE(device_id,''),created_at FROM server_audit_log ORDER BY id DESC LIMIT 100`)
+func (s *Server) webAudit(list webList) ([]webAudit, webList, error) {
+	where := ""
+	args := []interface{}{}
+	if list.Query != "" {
+		where = " WHERE (event_type LIKE ? OR user_id LIKE ? OR device_id LIKE ?)"
+		like := "%" + list.Query + "%"
+		args = append(args, like, like, like)
+	}
+	var total int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM server_audit_log"+where, args...).Scan(&total); err != nil {
+		return nil, list, err
+	}
+	list = finishWebList(list, total)
+	queryArgs := append([]interface{}{}, args...)
+	queryArgs = append(queryArgs, list.PerPage, (list.Page-1)*list.PerPage)
+	rows, err := s.db.Query(`SELECT event_type,COALESCE(user_id,''),COALESCE(device_id,''),created_at FROM server_audit_log`+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
-		return nil, err
+		return nil, list, err
 	}
 	defer rows.Close()
 	var out []webAudit
 	for rows.Next() {
 		var a webAudit
 		if err := rows.Scan(&a.Event, &a.User, &a.Device, &a.At); err != nil {
-			return nil, err
+			return nil, list, err
 		}
 		out = append(out, a)
 	}
-	return out, rows.Err()
+	return out, list, rows.Err()
 }
 
 func (s *Server) webSMTP() webSMTP {
@@ -370,6 +461,17 @@ func (s *Server) handleAdminWebAction(w http.ResponseWriter, r *http.Request) {
 		}
 		s.auditLog("smtp_settings_updated", "", "", s.clientIP(r), "updated by administrator")
 		http.Redirect(w, r, "/admin/settings", http.StatusSeeOther)
+	case "cleanup":
+		if !s.adminReauth(r, session.SubjectID) {
+			s.renderWebError(w, r, http.StatusForbidden, "error.invalidCredentials", "/admin/storage")
+			return
+		}
+		if err := s.CleanupRetention(time.Now().UTC()); err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+		s.auditLog("retention_cleanup", "", "", s.clientIP(r), "safe retention cleanup run by administrator")
+		http.Redirect(w, r, "/admin/storage", http.StatusSeeOther)
 	default:
 		s.renderWebError(w, r, http.StatusBadRequest, "error.badRequest", "/admin/dashboard")
 	}
@@ -391,4 +493,36 @@ func (s *Server) handleAdminWebLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clearSessionCookies(w, r, sessionScopeAdmin)
 	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+}
+
+// handleAdminDiagnosticsJSON is intentionally a separate, authenticated
+// download: it contains operational state but never paths, credentials,
+// tokens, payloads, or user content.
+func (s *Server) handleAdminDiagnosticsJSON(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if !s.requireAdminCookie(w, r) {
+		return
+	}
+	stats, err := s.Stats(r.Context())
+	if err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	jsonOK(w, map[string]interface{}{
+		"health": s.healthStatus(r.Context()),
+		"stats":  stats,
+		"limits": map[string]interface{}{
+			"max_json_body":       s.cfg.Limits.MaxJSONBody,
+			"max_push_operations": s.cfg.Limits.MaxPushOperations,
+			"max_pull_page":       s.cfg.Limits.MaxPullPage,
+			"max_blob_bytes":      s.cfg.Limits.MaxBlobBytes,
+		},
+		"web": map[string]interface{}{
+			"default_locale":       s.cfg.Web.DefaultLocale,
+			"registration_allowed": s.cfg.Web.AllowRegistration,
+		},
+	})
 }

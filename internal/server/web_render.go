@@ -48,6 +48,7 @@ type webPage struct {
 	Vaults            []webVault
 	Audit             []webAudit
 	SMTP              webSMTP
+	List              webList
 }
 
 type webAdminUser struct {
@@ -66,6 +67,17 @@ type webVault struct {
 }
 type webAudit struct{ Event, User, Device, At string }
 type webSMTP struct{ Host, Port, User, Security, From, ServerURL string }
+
+type webList struct {
+	Query    string
+	Status   string
+	Page     int
+	PerPage  int
+	Total    int
+	Pages    int
+	Previous int
+	Next     int
+}
 
 type webDevice struct {
 	ID            string
@@ -93,7 +105,7 @@ func newWebRenderer() (*webRenderer, error) {
 		return nil, err
 	}
 	renderer := &webRenderer{templates: make(map[string]*template.Template)}
-	for _, page := range []string{"home", "login", "register", "forgot", "reset", "message", "error", "admin_login", "dashboard", "admin", "admin_create_user"} {
+	for _, page := range []string{"home", "login", "register", "forgot", "reset", "confirm", "message", "error", "admin_login", "dashboard", "admin", "admin_create_user"} {
 		clone, err := layout.Clone()
 		if err != nil {
 			return nil, err
@@ -215,6 +227,15 @@ func (s *Server) handleResetDone(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	s.renderPage(w, r, "message", webPage{Title: "reset.doneTitle", Heading: "reset.doneTitle", Message: "reset.doneMessage", BackURL: "/login"})
+}
+
+func (s *Server) handleConfirmResult(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	s.renderPage(w, r, "message", webPage{Title: "confirm.resultTitle", Heading: "confirm.resultTitle", Message: "confirm.resultMessage", BackURL: "/login"})
 }
 
 func securityHeaders(next http.Handler) http.Handler {

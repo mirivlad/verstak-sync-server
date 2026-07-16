@@ -64,23 +64,6 @@ func TestConfigSetAdmin(t *testing.T) {
 	}
 }
 
-func TestAdminDashboardSMTPSecuritySelectUsesApplicationStyles(t *testing.T) {
-	html := adminDashboardHTML("en", 0, 0, "", "", "", "", "starttls", "")
-
-	for _, expected := range []string{
-		`<select name="smtp_security" class="form-select">`,
-		`.form-select{`,
-		`appearance:none`,
-		`background-image:linear-gradient`,
-		`.form-select option{background:#13131f;color:#e4e4ef}`,
-		`.form-select:focus{outline:none;border-color:#6366f1`,
-	} {
-		if !strings.Contains(html, expected) {
-			t.Errorf("SMTP security select is missing application styling %q", expected)
-		}
-	}
-}
-
 func TestUserFacingServerErrorsDoNotExposeInternalDetails(t *testing.T) {
 	for _, name := range []string{"handlers_auth.go", "handlers_api.go", "handlers_admin.go", "handlers_web_user.go"} {
 		source, err := os.ReadFile(name)

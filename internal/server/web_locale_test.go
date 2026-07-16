@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -55,6 +56,27 @@ func TestEmbeddedTemplatesUseExternalAssetsAndNoInlineEventHandlers(t *testing.T
 	}
 }
 
+func TestEmbeddedTemplateTranslationKeysExist(t *testing.T) {
+	entries, err := fs.Glob(webFS, "web/templates/*.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPattern := regexp.MustCompile(`t\s+\$?\.Locale\s+"([^"]+)"`)
+	for _, name := range entries {
+		body, err := webFS.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, match := range keyPattern.FindAllStringSubmatch(string(body), -1) {
+			for _, locale := range []string{"ru", "en"} {
+				if _, ok := _translations[locale][match[1]]; !ok {
+					t.Fatalf("%s references missing %s translation key %q", name, locale, match[1])
+				}
+			}
+		}
+	}
+}
+
 func TestPublicHomeUsesSharedLocalizedTemplateLayout(t *testing.T) {
 	s, err := newTestServer(t)
 	if err != nil {
@@ -77,6 +99,59 @@ func TestPublicHomeUsesSharedLocalizedTemplateLayout(t *testing.T) {
 	}
 	if strings.Contains(body, "<style>") {
 		t.Fatalf("home must use embedded static CSS, not inline style: %s", body)
+	}
+}
+
+func TestPublicTemplateRoutesRenderInBothLocales(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetupRoutes()
+	for _, locale := range []string{"ru", "en"} {
+		for _, path := range []string{"/", "/login", "/register", "/forgot", "/admin/login"} {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.AddCookie(&http.Cookie{Name: webLocaleCookieName, Value: locale})
+			res := httptest.NewRecorder()
+			s.Handler().ServeHTTP(res, req)
+			if res.Code != http.StatusOK {
+				t.Fatalf("%s %s = %d", locale, path, res.Code)
+			}
+			if !strings.Contains(res.Body.String(), `<html lang="`+locale+`">`) {
+				t.Fatalf("%s %s has wrong document language", locale, path)
+			}
+		}
+	}
+}
+
+func TestWebSessionScopesDoNotCrossAuthorizePages(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetupRoutes()
+	adminToken, _, err := s.createSession(sessionScopeAdmin, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	userToken, _, err := s.createSession(sessionScopeUser, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ path, cookie string }{{"/dashboard", adminToken}, {"/admin/dashboard", userToken}} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		if tc.path == "/dashboard" {
+			req.AddCookie(&http.Cookie{Name: "admin_session", Value: tc.cookie})
+		} else {
+			req.AddCookie(&http.Cookie{Name: "user_session", Value: tc.cookie})
+		}
+		res := httptest.NewRecorder()
+		s.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusFound {
+			t.Fatalf("%s with wrong scope = %d", tc.path, res.Code)
+		}
 	}
 }
 
@@ -151,6 +226,65 @@ func TestAdminLoginUsesSharedTemplateAndAdminRootRedirects(t *testing.T) {
 	s.Handler().ServeHTTP(root, httptest.NewRequest(http.MethodGet, "/admin", nil))
 	if root.Code != http.StatusFound || root.Header().Get("Location") != "/admin/dashboard" {
 		t.Fatalf("admin root=%d %q", root.Code, root.Header().Get("Location"))
+	}
+}
+
+func TestDiagnosticsDownloadRequiresAdminAndDoesNotExposePaths(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetupRoutes()
+	unauthorized := httptest.NewRecorder()
+	s.Handler().ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/admin/diagnostics.json", nil))
+	if unauthorized.Code != http.StatusFound {
+		t.Fatalf("unauthorized diagnostics = %d", unauthorized.Code)
+	}
+	token, _, err := s.createSession(sessionScopeAdmin, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/diagnostics.json", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: token})
+	res := httptest.NewRecorder()
+	s.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("diagnostics = %d: %s", res.Code, res.Body.String())
+	}
+	if strings.Contains(res.Body.String(), s.dbPath) || strings.Contains(res.Body.String(), s.blobsDir) {
+		t.Fatalf("diagnostics leaked internal path: %s", res.Body.String())
+	}
+}
+
+func TestAdminUserListSearchStatusAndPagination(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for i, username := range []string{"alice", "alina", "blocked-user", "bob"} {
+		blocked := 0
+		if username == "blocked-user" {
+			blocked = 1
+		}
+		if _, err := s.db.Exec("INSERT INTO server_users (id,username,email,password_hash,confirmed,blocked,created_at) VALUES (?, ?, ?, 'hash', 1, ?, '2026-01-01T00:00:00Z')", strconvItoa(i), username, username+"@example.test", blocked); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, list, err := s.webAdminUsers(webList{Query: "ali", Page: 1, PerPage: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.Total != 2 || list.Pages != 2 || len(items) != 1 || items[0].Username != "alice" {
+		t.Fatalf("search pagination: list=%+v items=%+v", list, items)
+	}
+	items, list, err = s.webAdminUsers(webList{Status: "blocked", Page: 1, PerPage: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.Total != 1 || len(items) != 1 || !items[0].Blocked {
+		t.Fatalf("status filter: list=%+v items=%+v", list, items)
 	}
 }
 
