@@ -245,6 +245,11 @@ values are `ru`, `en`, or `system`; `system` uses `Accept-Language`, then
 Registration is controlled by `web.allow_registration`; when disabled the
 public registration page does not expose account creation.
 
+The admin console also provides bounded user/device/audit lists, a vault detail
+view with aggregates only (never file payloads), safe retention cleanup, and a
+sanitized diagnostics download. General web settings are stored in the existing
+`config.yml`; SMTP passwords are not returned to a browser form.
+
 All browser mutations use POST and validate a server-side session plus CSRF
 token. The server returns security headers including a restrictive CSP,
 `frame-ancestors 'none'`, `nosniff`, and a same-origin referrer policy. The
@@ -334,6 +339,9 @@ new clients.
 ```bash
 # Run tests
 go test ./...
+
+# Run real headless Chromium smoke screenshots in a temporary directory
+./scripts/smoke-web.sh
 
 # Build for production
 CGO_ENABLED=1 go build -o verstak-sync-server ./cmd/server
