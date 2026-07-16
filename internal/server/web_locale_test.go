@@ -155,6 +155,38 @@ func TestWebSessionScopesDoNotCrossAuthorizePages(t *testing.T) {
 	}
 }
 
+func TestAdminVaultDetailIsScopedAndDoesNotExposePayload(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetupRoutes()
+	if _, err := s.db.Exec("INSERT INTO server_users (id,username,email,password_hash,confirmed,created_at) VALUES ('u1','alice','a@example.test','hash',1,'2026-01-01T00:00:00Z')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("INSERT INTO server_devices (id,name,api_key,user_id,vault_id,created_at) VALUES ('d1','Laptop','legacy','u1','vault-a','2026-01-01T00:00:00Z')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("INSERT INTO server_ops (op_id,server_sequence,user_id,vault_id,device_id,entity_type,entity_id,op_type,payload_json,created_at,pushed_at) VALUES ('op1',1,'u1','vault-a','d1','file','x','create','{\"secret\":\"payload\"}','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')"); err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := s.createSession(sessionScopeAdmin, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/vault/?user=u1&vault=vault-a", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: token})
+	res := httptest.NewRecorder()
+	s.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("vault detail=%d: %s", res.Code, res.Body.String())
+	}
+	if strings.Contains(res.Body.String(), "payload") || strings.Contains(res.Body.String(), "secret") {
+		t.Fatalf("vault detail leaked operation payload: %s", res.Body.String())
+	}
+}
+
 func TestLocaleSelectionUsesCookieAndPRG(t *testing.T) {
 	s, err := newTestServer(t)
 	if err != nil {

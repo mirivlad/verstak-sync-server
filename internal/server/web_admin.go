@@ -21,6 +21,32 @@ func (s *Server) handleAdminRoot(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/dashboard", http.StatusFound)
 }
 
+func (s *Server) handleAdminVaultDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if !s.requireAdminCookie(w, r) {
+		return
+	}
+	userID, vaultID := r.URL.Query().Get("user"), r.URL.Query().Get("vault")
+	if userID == "" || vaultID == "" {
+		s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/admin/vaults")
+		return
+	}
+	var d webVaultDetail
+	if err := s.db.QueryRow(`SELECT COALESCE((SELECT username FROM server_users WHERE id=?),''), COUNT(DISTINCT d.id), COUNT(DISTINCT o.op_id), COALESCE(MAX(d.last_seen),'') FROM server_devices d LEFT JOIN server_ops o ON o.user_id=d.user_id AND o.vault_id=d.vault_id WHERE d.user_id=? AND d.vault_id=?`, userID, userID, vaultID).Scan(&d.User, &d.Devices, &d.Operations, &d.LastActivity); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	d.Vault = vaultID
+	if err := s.db.QueryRow(`SELECT COALESCE(SUM(size),0) FROM server_blob_refs WHERE user_id=? AND vault_id=?`, userID, vaultID).Scan(&d.BlobBytes); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	s.renderPage(w, r, "vault_detail", webPage{Title: "admin.vaults", Admin: true, VaultDetail: d})
+}
+
 func (s *Server) handleAdminCreateUserWeb(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdminCookie(w, r) {
 		return
@@ -234,7 +260,7 @@ func (s *Server) webAdminDevices(list webList) ([]webAdminDevice, webList, error
 }
 
 func (s *Server) webVaults() ([]webVault, error) {
-	rows, err := s.db.Query(`SELECT COALESCE(u.username,''),d.vault_id,COUNT(DISTINCT d.id),COUNT(o.op_id),COALESCE(MAX(d.last_seen),'') FROM server_devices d LEFT JOIN server_users u ON u.id=d.user_id LEFT JOIN server_ops o ON o.user_id=d.user_id AND o.vault_id=d.vault_id WHERE COALESCE(d.user_id,'')!='' AND COALESCE(d.vault_id,'')!='' GROUP BY d.user_id,d.vault_id ORDER BY MAX(d.last_seen) DESC`)
+	rows, err := s.db.Query(`SELECT COALESCE(u.username,''),d.user_id,d.vault_id,COUNT(DISTINCT d.id),COUNT(o.op_id),COALESCE(MAX(d.last_seen),'') FROM server_devices d LEFT JOIN server_users u ON u.id=d.user_id LEFT JOIN server_ops o ON o.user_id=d.user_id AND o.vault_id=d.vault_id WHERE COALESCE(d.user_id,'')!='' AND COALESCE(d.vault_id,'')!='' GROUP BY d.user_id,d.vault_id ORDER BY MAX(d.last_seen) DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +268,7 @@ func (s *Server) webVaults() ([]webVault, error) {
 	var out []webVault
 	for rows.Next() {
 		var v webVault
-		if err := rows.Scan(&v.User, &v.Vault, &v.Devices, &v.Operations, &v.LastActivity); err != nil {
+		if err := rows.Scan(&v.User, &v.UserID, &v.Vault, &v.Devices, &v.Operations, &v.LastActivity); err != nil {
 			return nil, err
 		}
 		out = append(out, v)

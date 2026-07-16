@@ -43,6 +43,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/admin/api/users/create", s.handleAdminAPICreateUser)
 	s.mux.HandleFunc("/admin/devices", s.handleAdminWeb)
 	s.mux.HandleFunc("/admin/vaults", s.handleAdminWeb)
+	s.mux.HandleFunc("/admin/vault/", s.handleAdminVaultDetail)
 	s.mux.HandleFunc("/admin/storage", s.handleAdminWeb)
 	s.mux.HandleFunc("/admin/audit", s.handleAdminWeb)
 	s.mux.HandleFunc("/admin/settings", s.handleAdminWeb)

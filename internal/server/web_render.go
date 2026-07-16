@@ -49,6 +49,7 @@ type webPage struct {
 	Audit             []webAudit
 	SMTP              webSMTP
 	List              webList
+	VaultDetail       webVaultDetail
 }
 
 type webAdminUser struct {
@@ -61,7 +62,7 @@ type webAdminDevice struct {
 	Revoked                                             bool
 }
 type webVault struct {
-	User, Vault         string
+	User, UserID, Vault string
 	Devices, Operations int
 	LastActivity        string
 }
@@ -77,6 +78,11 @@ type webList struct {
 	Pages    int
 	Previous int
 	Next     int
+}
+type webVaultDetail struct {
+	User, Vault, LastActivity string
+	Devices, Operations       int
+	BlobBytes                 int64
 }
 
 type webDevice struct {
@@ -105,7 +111,7 @@ func newWebRenderer() (*webRenderer, error) {
 		return nil, err
 	}
 	renderer := &webRenderer{templates: make(map[string]*template.Template)}
-	for _, page := range []string{"home", "login", "register", "forgot", "reset", "confirm", "message", "error", "admin_login", "dashboard", "admin", "admin_create_user"} {
+	for _, page := range []string{"home", "login", "register", "forgot", "reset", "confirm", "message", "error", "admin_login", "dashboard", "admin", "admin_create_user", "vault_detail"} {
 		clone, err := layout.Clone()
 		if err != nil {
 			return nil, err
