@@ -125,6 +125,7 @@ await toggleTemporaryUser();
 // process so the subsequent user login exercises the generated credential.
 await evaluate(`(() => { const row = [...document.querySelectorAll('tbody tr')].find((item) => item.textContent.includes('browser-smoke-user')); const details = row.querySelector('details'); details.open = true; const form = [...row.querySelectorAll('form')].find((item) => item.querySelector('[name=action]')?.value === 'reset-user-password'); form.querySelector('[name=password]').value = 'browser-smoke-admin-password'; form.querySelector('button').click(); })()`);
 await confirmDialog("/admin/password-result");
+await waitFor(() => evaluate("!['Загрузка...', 'Loading...', '—'].includes(document.querySelector('.one-time-secret')?.textContent.trim())"), "generated one-time password");
 await screenshot("admin-password-result");
 const generatedPassword = await evaluate("document.querySelector('.one-time-secret')?.textContent.trim()");
 if (!generatedPassword || (await evaluate("location.href")).includes(generatedPassword)) throw new Error("one-time password result is missing or leaked into the URL");

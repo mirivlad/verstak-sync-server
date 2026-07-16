@@ -240,8 +240,9 @@ users, devices, vaults, storage, audit, SMTP settings, and diagnostics. Lists
 use bounded server-side search, filters, whitelisted sort order, and pagination.
 Administrators can create, edit, confirm, block, reset, and delete users; revoke
 devices; and permanently remove only a previously revoked device. A browser
-password reset generates a random password and exposes it once on a `no-store`
-page; it is never placed in the URL, audit log, cookies, or database plaintext.
+password reset generates a random password and exposes it once through a
+CSRF-protected `no-store` POST after the result page loads; it is never placed
+in the URL, initial HTML source, audit log, cookies, or database plaintext.
 Destructive
 browser actions use the shared local confirmation dialog. Blocking, credential
 changes, device actions, cleanup, and SMTP changes require the current

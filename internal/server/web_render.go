@@ -44,7 +44,6 @@ type webPage struct {
 	FormAction        string
 	BackURL           string
 	Token             string
-	OneTimeSecret     string
 	Admin             bool
 	UserName          string
 	Email             string

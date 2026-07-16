@@ -38,6 +38,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/admin/logout", s.handleAdminWebLogout)
 	s.mux.HandleFunc("/admin/action", s.handleAdminWebAction)
 	s.mux.HandleFunc("/admin/password-result", s.handleAdminPasswordResult)
+	s.mux.HandleFunc("/admin/password-result/secret", s.handleAdminPasswordResultSecret)
 	s.mux.HandleFunc("/admin/dashboard", s.handleAdminWeb)
 	s.mux.HandleFunc("/admin/users", s.handleAdminWeb)
 	s.mux.HandleFunc("/admin/create-user", s.handleAdminCreateUserWeb)

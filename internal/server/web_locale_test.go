@@ -650,15 +650,26 @@ func TestAdminPasswordResetShowsGeneratedSecretOnce(t *testing.T) {
 	resultRequest.AddCookie(&http.Cookie{Name: "admin_session", Value: adminToken})
 	resultResponse := httptest.NewRecorder()
 	s.Handler().ServeHTTP(resultResponse, resultRequest)
-	if resultResponse.Code != http.StatusOK || !strings.Contains(resultResponse.Header().Get("Cache-Control"), "no-store") || !strings.Contains(resultResponse.Body.String(), "one-time-secret") {
+	if resultResponse.Code != http.StatusOK || !strings.Contains(resultResponse.Header().Get("Cache-Control"), "no-store") || !strings.Contains(resultResponse.Body.String(), "data-one-time-secret-url") {
 		t.Fatalf("password result=%d headers=%v body=%s", resultResponse.Code, resultResponse.Header(), resultResponse.Body.String())
 	}
-	secondRequest := httptest.NewRequest(http.MethodGet, "/admin/password-result", nil)
+	secretRequest := httptest.NewRequest(http.MethodPost, "/admin/password-result/secret", nil)
+	secretRequest.Header.Set("X-CSRF-Token", csrf)
+	secretRequest.AddCookie(&http.Cookie{Name: "admin_session", Value: adminToken})
+	secretRequest.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+	secretResponse := httptest.NewRecorder()
+	s.Handler().ServeHTTP(secretResponse, secretRequest)
+	if secretResponse.Code != http.StatusOK || !strings.Contains(secretResponse.Header().Get("Cache-Control"), "no-store") || !strings.Contains(secretResponse.Body.String(), `"password"`) {
+		t.Fatalf("secret response=%d headers=%v body=%s", secretResponse.Code, secretResponse.Header(), secretResponse.Body.String())
+	}
+	secondRequest := httptest.NewRequest(http.MethodPost, "/admin/password-result/secret", nil)
+	secondRequest.Header.Set("X-CSRF-Token", csrf)
 	secondRequest.AddCookie(&http.Cookie{Name: "admin_session", Value: adminToken})
+	secondRequest.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
 	secondResponse := httptest.NewRecorder()
 	s.Handler().ServeHTTP(secondResponse, secondRequest)
-	if secondResponse.Code != http.StatusSeeOther || secondResponse.Header().Get("Location") != "/admin/users" {
-		t.Fatalf("second password result=%d %q", secondResponse.Code, secondResponse.Header().Get("Location"))
+	if secondResponse.Code != http.StatusGone {
+		t.Fatalf("second password result=%d: %s", secondResponse.Code, secondResponse.Body.String())
 	}
 }
 

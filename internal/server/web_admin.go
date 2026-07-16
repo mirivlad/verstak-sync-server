@@ -62,18 +62,30 @@ func (s *Server) handleAdminPasswordResult(w http.ResponseWriter, r *http.Reques
 	if !s.requireAdminCookie(w, r) {
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store, max-age=0")
+	s.renderPage(w, r, "admin_password_result", webPage{Title: "admin.resetPassword", Admin: true, AdminPage: "users"})
+}
+
+func (s *Server) handleAdminPasswordResultSecret(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if !s.requireAdminMutation(w, r) {
+		return
+	}
 	cookie, err := r.Cookie("admin_session")
 	if err != nil {
-		http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+		jsonErrCode(w, http.StatusForbidden, "session_invalid", "administrator session is required")
 		return
 	}
 	secret := s.takeAdminOneTimeSecret(cookie.Value)
 	if secret == "" {
-		http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+		jsonErrCode(w, http.StatusGone, "one_time_secret_expired", "one-time password is no longer available")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store, max-age=0")
-	s.renderPage(w, r, "admin_password_result", webPage{Title: "admin.resetPassword", Admin: true, AdminPage: "users", OneTimeSecret: secret})
+	jsonOK(w, map[string]string{"password": secret})
 }
 
 func (s *Server) handleAdminVaultDetail(w http.ResponseWriter, r *http.Request) {

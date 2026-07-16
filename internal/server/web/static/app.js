@@ -36,3 +36,11 @@ document.addEventListener("click", async function (event) {
     // The downloadable JSON link remains available when clipboard access is unavailable.
   }
 });
+
+const oneTimeSecret = document.querySelector("[data-one-time-secret-url]");
+if (oneTimeSecret) {
+  fetch(oneTimeSecret.dataset.oneTimeSecretUrl, { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": oneTimeSecret.dataset.csrfToken } })
+    .then(async function (response) { if (!response.ok) throw new Error("one-time secret unavailable"); return response.json(); })
+    .then(function (data) { oneTimeSecret.querySelector(".one-time-secret").textContent = data.password; })
+    .catch(function () { oneTimeSecret.querySelector(".one-time-secret").textContent = "—"; });
+}
