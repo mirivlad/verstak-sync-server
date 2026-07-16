@@ -125,6 +125,22 @@ func TestPublicTemplateRoutesRenderInBothLocales(t *testing.T) {
 	}
 }
 
+func TestConfirmationPageUsesSharedTemplateAndEscapesToken(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetupRoutes()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/confirm?token=%3Cscript%3E", nil)
+	req.AddCookie(&http.Cookie{Name: webLocaleCookieName, Value: "ru"})
+	res := httptest.NewRecorder()
+	s.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `<html lang="ru">`) || strings.Contains(res.Body.String(), "<script>") {
+		t.Fatalf("confirmation template/escaping failure: %d %s", res.Code, res.Body.String())
+	}
+}
+
 func TestWebSessionScopesDoNotCrossAuthorizePages(t *testing.T) {
 	s, err := newTestServer(t)
 	if err != nil {
