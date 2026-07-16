@@ -17,20 +17,10 @@ import (
 func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Admin Login</title>
-<style>body{font-family:sans-serif;background:#1a1a2e;color:#e0e0f0;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
-form{background:#16213e;padding:2rem;border-radius:8px;border:1px solid #0f3460;width:300px}
-h2{margin:0 0 1rem;color:#e0e0f0}label{display:block;color:#a0a0b8;font-size:0.85rem;margin-bottom:0.35rem}
-input{width:100%;background:#0f3460;border:1px solid #1a3a5c;color:#e0e0f0;padding:8px 10px;border-radius:4px;font-size:0.85rem;box-sizing:border-box;margin-bottom:0.75rem}
-button{background:#4ecca3;color:#1a1a2e;border:none;padding:0.5rem 1rem;border-radius:4px;cursor:pointer;font-weight:600;width:100%}</style></head>
-<body><form method="POST"><h2>Admin Login</h2>
-<label>Username</label><input name="username" required>
-<label>Password</label><input type="password" name="password" required>
-<button type="submit">Login</button></form></body></html>`))
+		s.renderPage(w, r, "admin_login", webPage{Title: "admin.loginTitle", Admin: true})
 	case "POST":
 		if err := r.ParseForm(); err != nil {
-			http.Error(w, "bad form", 400)
+			s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/admin/login")
 			return
 		}
 		user := r.FormValue("username")
@@ -39,7 +29,7 @@ button{background:#4ecca3;color:#1a1a2e;border:none;padding:0.5rem 1rem;border-r
 			return
 		}
 		if !s.cfg.CheckAdmin(user, pass) {
-			http.Error(w, "401 Unauthorized", 401)
+			s.renderPageStatus(w, r, "admin_login", webPage{Title: "admin.loginTitle", Admin: true, Flash: "error.invalidCredentials"}, http.StatusUnauthorized)
 			return
 		}
 		tok, csrf, err := s.createSession(sessionScopeAdmin, user)
@@ -48,9 +38,9 @@ button{background:#4ecca3;color:#1a1a2e;border:none;padding:0.5rem 1rem;border-r
 			return
 		}
 		s.setSessionCookies(w, r, sessionScopeAdmin, tok, csrf)
-		http.Redirect(w, r, "/admin/dashboard", http.StatusFound)
+		http.Redirect(w, r, "/admin/dashboard", http.StatusSeeOther)
 	default:
-		http.Error(w, "method not allowed", 405)
+		methodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 

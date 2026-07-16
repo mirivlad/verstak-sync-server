@@ -1,0 +1,7 @@
+{{define "login"}}{{template "layout" .}}{{end}}
+{{define "content"}}
+<section class="auth-card card"><p class="eyebrow">{{t .Locale "auth.welcome"}}</p><h1>{{t .Locale "auth.loginTitle"}}</h1>
+{{if .Flash}}<p class="flash error" role="alert">{{t .Locale .Flash}}</p>{{end}}
+<form method="post" action="/login" class="stack"><label>{{t .Locale "field.usernameOrEmail"}}<input name="username" autocomplete="username" required autofocus></label><label>{{t .Locale "field.password"}}<input name="password" type="password" autocomplete="current-password" required></label><button class="button primary" type="submit">{{t .Locale "auth.login"}}</button></form>
+<p class="muted"><a href="/forgot">{{t .Locale "auth.forgot"}}</a>{{if .AllowRegistration}} · <a href="/register">{{t .Locale "auth.register"}}</a>{{end}}</p></section>
+{{end}}

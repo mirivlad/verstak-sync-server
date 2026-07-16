@@ -4,11 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"html"
 	"log"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,316 +20,258 @@ func (s *Server) requireUserWeb(w http.ResponseWriter, r *http.Request) (string,
 	return session.SubjectID, true
 }
 
+func (s *Server) renderWebError(w http.ResponseWriter, r *http.Request, status int, message, back string) {
+	s.renderPageStatus(w, r, "error", webPage{Title: "error.label", Heading: "error.badRequest", Message: message, BackURL: back}, status)
+}
+
 func (s *Server) handleUserWebRegister(w http.ResponseWriter, r *http.Request) {
-	locale := s.locale()
+	if !s.cfg.Web.AllowRegistration {
+		s.renderWebError(w, r, http.StatusNotFound, "error.registrationDisabled", "/login")
+		return
+	}
 	switch r.Method {
-	case "GET":
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(userRegisterHTML(locale)))
-	case "POST":
+	case http.MethodGet:
+		s.renderPage(w, r, "register", webPage{Title: "auth.registerTitle"})
+	case http.MethodPost:
 		if err := r.ParseForm(); err != nil {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(400)
-			w.Write([]byte(errorPageHTML(locale, "400 Bad request", "400 Bad request", "/register")))
+			s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/register")
 			return
 		}
-		username := r.FormValue("username")
-		email := r.FormValue("email")
-		password := r.FormValue("password")
+		username, email, password := strings.TrimSpace(r.FormValue("username")), strings.TrimSpace(r.FormValue("email")), r.FormValue("password")
 		if username == "" || email == "" || password == "" {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(400)
-			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "server.allFieldsRequired"), "/register")))
+			s.renderPage(w, r, "register", webPage{Title: "auth.registerTitle", Flash: "error.allFieldsRequired"})
 			return
 		}
 		if !s.allowRate(w, r, "register", email) {
 			return
 		}
 		if err := validatePassword(password); err != "" {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(400)
-			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), string(err), "/register")))
+			s.renderPage(w, r, "register", webPage{Title: "auth.registerTitle", Flash: "error.passwordInvalid"})
 			return
 		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 		if err != nil {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(500)
-			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), "internal error", "/register")))
+			log.Printf("web register: password hashing: %v", err)
+			s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/register")
 			return
 		}
-		now := time.Now().UTC().Format(time.RFC3339)
 		id := make([]byte, 12)
-		rand.Read(id)
+		if _, err := rand.Read(id); err != nil {
+			s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/register")
+			return
+		}
 		userID := hex.EncodeToString(id)
-		_, err = s.db.Exec(
-			"INSERT INTO server_users (id, username, email, password_hash, confirmed, created_at) VALUES (?, ?, ?, ?, 0, ?)",
-			userID, username, strings.ToLower(email), string(hash), now,
-		)
-		if err != nil {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		now := time.Now().UTC().Format(time.RFC3339)
+		if _, err := s.db.Exec("INSERT INTO server_users (id, username, email, password_hash, confirmed, created_at) VALUES (?, ?, ?, ?, 0, ?)", userID, username, strings.ToLower(email), string(hash), now); err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
-				w.WriteHeader(409)
-				w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), "Username or email already taken", "/register")))
-			} else {
-				log.Printf("register web: create user failed: %v", err)
-				w.WriteHeader(500)
-				w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "server.registrationFailed"), "/register")))
+				s.renderPage(w, r, "register", webPage{Title: "auth.registerTitle", Flash: "error.accountTaken"})
+				return
 			}
+			log.Printf("web register: create user: %v", err)
+			s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/register")
 			return
 		}
-		tokenStr, err := issueEmailToken(s.db, userID, "confirm", 48*time.Hour)
+		token, err := issueEmailToken(s.db, userID, "confirm", 48*time.Hour)
 		if err != nil {
-			jsonInternalError(w, err)
+			log.Printf("web register: issue confirmation token: %v", err)
+			s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/register")
 			return
 		}
-		host := s.smtpGet("smtp_host")
-		if host != "" {
-			srvURL := s.smtpGet("server_url")
-			var confirmURL string
-			if srvURL != "" {
-				confirmURL = fmt.Sprintf("%s/api/v1/auth/confirm?token=%s", srvURL, tokenStr)
-			} else {
-				confirmURL = fmt.Sprintf("http://%s/api/v1/auth/confirm?token=%s", r.Host, tokenStr)
+		if host := s.smtpGet("smtp_host"); host != "" {
+			base := s.smtpGet("server_url")
+			if base == "" {
+				base = "http://" + r.Host
 			}
-			body := fmt.Sprintf(t(locale, "server.emailConfirmBody"), confirmURL)
-			if err := s.smtpSend(email, t(locale, "server.emailConfirmSubject"), body); err != nil {
-				log.Printf("register web: failed to send confirm email: %v", err)
+			confirmURL := fmt.Sprintf("%s/api/v1/auth/confirm?token=%s", strings.TrimRight(base, "/"), token)
+			if err := s.smtpSend(email, t(s.webLocale(r), "server.emailConfirmSubject"), fmt.Sprintf(t(s.webLocale(r), "server.emailConfirmBody"), confirmURL)); err != nil {
+				log.Printf("web register: confirmation mail: %v", err)
 			}
 		} else if s.cfg.DevelopmentTokenLogging {
-			log.Printf("development confirmation token for user %s: %s", username, tokenStr)
+			log.Printf("development confirmation token for user %s: %s", username, token)
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(registrationOKHTML(locale)))
+		http.Redirect(w, r, "/register/result", http.StatusSeeOther)
 	default:
-		jsonErr(w, 405, "method not allowed")
+		methodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
 func (s *Server) handleUserWebForgot(w http.ResponseWriter, r *http.Request) {
-	locale := s.locale()
 	switch r.Method {
-	case "GET":
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(forgotPasswordHTML(locale)))
-	case "POST":
+	case http.MethodGet:
+		s.renderPage(w, r, "forgot", webPage{Title: "auth.forgotTitle"})
+	case http.MethodPost:
 		if err := r.ParseForm(); err != nil {
-			jsonErr(w, 400, "bad form")
+			s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/forgot")
 			return
 		}
-		email := strings.ToLower(r.FormValue("email"))
+		email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
 		if email == "" {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "server.needEmail"), "/forgot")))
+			s.renderPage(w, r, "forgot", webPage{Title: "auth.forgotTitle", Flash: "error.emailRequired"})
 			return
 		}
 		if !s.allowRate(w, r, "forgot", email) {
 			return
 		}
 		var userID string
-		err := s.db.QueryRow("SELECT id FROM server_users WHERE email=?", email).Scan(&userID)
-		if err != nil {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Write([]byte(forgotSentHTML(locale)))
-			return
-		}
-		tokenStr, err := issueEmailToken(s.db, userID, "reset", time.Hour)
-		if err != nil {
-			jsonInternalError(w, err)
-			return
-		}
-		host := s.smtpGet("smtp_host")
-		if host != "" {
-			srvURL := s.smtpGet("server_url")
-			resetURL := fmt.Sprintf("/reset?token=%s", tokenStr)
-			if srvURL != "" {
-				resetURL = fmt.Sprintf("%s/reset?token=%s", srvURL, tokenStr)
+		if err := s.db.QueryRow("SELECT id FROM server_users WHERE email=?", email).Scan(&userID); err == nil {
+			token, issueErr := issueEmailToken(s.db, userID, "reset", time.Hour)
+			if issueErr != nil {
+				log.Printf("web forgot: issue reset token: %v", issueErr)
+				s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/forgot")
+				return
 			}
-			body := fmt.Sprintf(t(locale, "server.emailResetBody"), resetURL)
-			if err := s.smtpSend(email, t(locale, "server.emailResetSubject"), body); err != nil {
-				log.Printf("forgot web: failed to send reset email: %v", err)
+			if s.smtpGet("smtp_host") != "" {
+				base := s.smtpGet("server_url")
+				if base == "" {
+					base = "http://" + r.Host
+				}
+				resetURL := fmt.Sprintf("%s/reset?token=%s", strings.TrimRight(base, "/"), token)
+				if err := s.smtpSend(email, t(s.webLocale(r), "server.emailResetSubject"), fmt.Sprintf(t(s.webLocale(r), "server.emailResetBody"), resetURL)); err != nil {
+					log.Printf("web forgot: reset mail: %v", err)
+				}
+			} else if s.cfg.DevelopmentTokenLogging {
+				log.Printf("development reset token requested for %s: %s", email, token)
 			}
-		} else if s.cfg.DevelopmentTokenLogging {
-			log.Printf("development reset token requested for %s: %s", email, tokenStr)
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(forgotSentHTML(locale)))
+		http.Redirect(w, r, "/forgot/sent", http.StatusSeeOther)
 	default:
-		jsonErr(w, 405, "method not allowed")
+		methodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
+func (s *Server) validResetToken(token string) bool {
+	var expiresAt string
+	if err := s.db.QueryRow("SELECT expires_at FROM server_email_tokens WHERE token_hash=? AND purpose='reset'", emailTokenHash(token)).Scan(&expiresAt); err != nil {
+		return false
+	}
+	expires, err := time.Parse(time.RFC3339, expiresAt)
+	return err == nil && time.Now().Before(expires)
+}
+
 func (s *Server) handleUserWebReset(w http.ResponseWriter, r *http.Request) {
-	locale := s.locale()
+	w.Header().Set("Cache-Control", "no-store")
 	switch r.Method {
-	case "GET":
+	case http.MethodGet:
 		token := r.URL.Query().Get("token")
-		if token == "" {
+		if token == "" || !s.validResetToken(token) {
 			http.Redirect(w, r, "/forgot", http.StatusFound)
 			return
 		}
-		var userID, expiresAt string
-		err := s.db.QueryRow("SELECT user_id, expires_at FROM server_email_tokens WHERE token_hash=? AND purpose='reset'",
-			emailTokenHash(token)).Scan(&userID, &expiresAt)
-		if err != nil {
-			http.Redirect(w, r, "/forgot", http.StatusFound)
-			return
-		}
-		exp, err := time.Parse(time.RFC3339, expiresAt)
-		if err != nil || time.Now().After(exp) {
-			http.Redirect(w, r, "/forgot", http.StatusFound)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		page := strings.ReplaceAll(resetPasswordHTML(locale), "{TOKEN}", html.EscapeString(token))
-		w.Write([]byte(page))
-	case "POST":
+		s.renderPage(w, r, "reset", webPage{Title: "auth.resetTitle", Token: token})
+	case http.MethodPost:
 		if err := r.ParseForm(); err != nil {
-			jsonErr(w, 400, "bad form")
+			s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/forgot")
 			return
 		}
-		token := r.FormValue("token")
-		newPass := r.FormValue("password")
-		confirm := r.FormValue("confirm")
-		if token == "" || newPass == "" || confirm == "" {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "server.allFieldsRequired"), "/forgot")))
+		token, password, confirm := r.FormValue("token"), r.FormValue("password"), r.FormValue("confirm")
+		if token == "" || password == "" || confirm == "" {
+			s.renderPage(w, r, "reset", webPage{Title: "auth.resetTitle", Token: token, Flash: "error.allFieldsRequired"})
 			return
 		}
 		if !s.allowRate(w, r, "reset", "") {
 			return
 		}
-		if err := validatePassword(newPass); err != "" {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), string(err), "/reset?token="+url.QueryEscape(token))))
+		if err := validatePassword(password); err != "" {
+			s.renderPage(w, r, "reset", webPage{Title: "auth.resetTitle", Token: token, Flash: "error.passwordInvalid"})
 			return
 		}
-		if newPass != confirm {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "server.passwordsDoNotMatch"), "/reset?token="+url.QueryEscape(token))))
+		if password != confirm {
+			s.renderPage(w, r, "reset", webPage{Title: "auth.resetTitle", Token: token, Flash: "error.passwordMismatch"})
 			return
 		}
-		userID, err := s.resetPasswordWithToken(token, newPass)
+		userID, err := s.resetPasswordWithToken(token, password)
 		if err == errResetTokenInvalid || err == errResetTokenExpired {
 			http.Redirect(w, r, "/forgot", http.StatusFound)
 			return
 		}
 		if err != nil {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "common.error"), "/forgot")))
+			log.Printf("web reset: %v", err)
+			s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/forgot")
 			return
 		}
 		log.Printf("reset: user %s reset password", userID)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(resetDoneHTML(locale)))
+		http.Redirect(w, r, "/reset/done", http.StatusSeeOther)
 	default:
-		jsonErr(w, 405, "method not allowed")
+		methodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
 func (s *Server) handleUserWebLogin(w http.ResponseWriter, r *http.Request) {
-	locale := s.locale()
 	switch r.Method {
-	case "GET":
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(userLoginHTML(locale)))
-	case "POST":
+	case http.MethodGet:
+		s.renderPage(w, r, "login", webPage{Title: "auth.loginTitle"})
+	case http.MethodPost:
 		if err := r.ParseForm(); err != nil {
-			jsonErr(w, 400, "bad form")
+			s.renderWebError(w, r, http.StatusBadRequest, "error.tryAgain", "/login")
 			return
 		}
-		username := r.FormValue("username")
-		password := r.FormValue("password")
-		if !s.allowRate(w, r, "login", username) {
+		login, password := strings.TrimSpace(r.FormValue("username")), r.FormValue("password")
+		if !s.allowRate(w, r, "login", login) {
 			return
 		}
 		var userID, hash string
 		var confirmed, blocked int
-		err := s.db.QueryRow("SELECT id, password_hash, confirmed, blocked FROM server_users WHERE username=? OR email=?",
-			username, strings.ToLower(username)).Scan(&userID, &hash, &confirmed, &blocked)
+		err := s.db.QueryRow("SELECT id, password_hash, confirmed, blocked FROM server_users WHERE username=? OR email=?", login, strings.ToLower(login)).Scan(&userID, &hash, &confirmed, &blocked)
 		if err != nil || blocked != 0 || confirmed == 0 || bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(401)
-			w.Write([]byte(errorPageHTML(locale, "401 Unauthorized", "401 Unauthorized", "/login")))
+			s.renderPageStatus(w, r, "login", webPage{Title: "auth.loginTitle", Flash: "error.invalidCredentials"}, http.StatusUnauthorized)
 			return
 		}
-		tok, csrf, err := s.createSession(sessionScopeUser, userID)
+		token, csrf, err := s.createSession(sessionScopeUser, userID)
 		if err != nil {
-			jsonInternalError(w, err)
+			log.Printf("web login: session: %v", err)
+			s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/login")
 			return
 		}
-		s.setSessionCookies(w, r, sessionScopeUser, tok, csrf)
-		http.Redirect(w, r, "/dashboard", http.StatusFound)
+		s.setSessionCookies(w, r, sessionScopeUser, token, csrf)
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 	default:
-		jsonErr(w, 405, "method not allowed")
+		methodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
 func (s *Server) handleUserDashboard(w http.ResponseWriter, r *http.Request) {
-	locale := s.locale()
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
 	userID, ok := s.requireUserWeb(w, r)
 	if !ok {
 		return
 	}
-	var username string
-	s.db.QueryRow("SELECT username FROM server_users WHERE id=?", userID).Scan(&username)
-
-	type dev struct {
-		ID, Name, LastSeen, CreatedAt, ClientVer, RevokedAt string
+	var username, email string
+	if err := s.db.QueryRow("SELECT username, email FROM server_users WHERE id=?", userID).Scan(&username, &email); err != nil {
+		s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/")
+		return
 	}
-	var devices []dev
-	rows, err := s.db.Query(`
-		SELECT d.id, d.name, COALESCE(d.last_seen,''), d.created_at,
-		       COALESCE(d.client_version,''), COALESCE(d.revoked_at,'')
-		FROM server_devices d
-		JOIN server_user_devices ud ON ud.device_id = d.id
-		WHERE ud.user_id = ?
-		ORDER BY d.created_at DESC`, userID)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var d dev
-			rows.Scan(&d.ID, &d.Name, &d.LastSeen, &d.CreatedAt, &d.ClientVer, &d.RevokedAt)
-			devices = append(devices, d)
+	rows, err := s.db.Query(`SELECT d.id, d.name, COALESCE(d.vault_id,''), COALESCE(d.client_version,''), COALESCE(d.last_seen,''), COALESCE(d.revoked_at,''), d.created_at FROM server_devices d JOIN server_user_devices ud ON ud.device_id=d.id WHERE ud.user_id=? ORDER BY d.created_at DESC`, userID)
+	if err != nil {
+		s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/")
+		return
+	}
+	defer rows.Close()
+	var devices []webDevice
+	for rows.Next() {
+		var d webDevice
+		var revoked string
+		if err := rows.Scan(&d.ID, &d.Name, &d.Vault, &d.ClientVersion, &d.LastSeen, &revoked, &d.CreatedAt); err != nil {
+			s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/")
+			return
 		}
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	deviceRows := ""
-	if len(devices) == 0 {
-		deviceRows = "<tr><td colspan='5' style='color:#666;text-align:center;padding:24px'>" + t(locale, "userDashboard.noDevices") + "</td></tr>"
-	} else {
-		for _, d := range devices {
-			ls := d.LastSeen
-			if ls == "" {
-				ls = "—"
-			}
-			created := d.CreatedAt
-			if len(created) > 10 {
-				created = created[:10]
-			}
-			status := "<span style='color:#34d399'>" + t(locale, "userDashboard.active") + "</span>"
-			revokeBtn := fmt.Sprintf(`<button class="btn btn-danger btn-sm" onclick="revokeDevice(%s)">%s</button>`, html.EscapeString(strconv.Quote(d.ID)), t(locale, "userDashboard.revoke"))
-			if d.RevokedAt != "" {
-				status = "<span style='color:#ff6b6b'>" + t(locale, "userDashboard.revoked") + "</span>"
-				revokeBtn = ""
-			}
-			deviceRows += fmt.Sprintf(`<tr>
-				<td>%s</td>
-				<td>%s</td>
-				<td>%s</td>
-				<td>%s</td>
-				<td>%s %s</td>
-			</tr>`, html.EscapeString(d.Name), status, html.EscapeString(created), html.EscapeString(ls), html.EscapeString(d.ClientVer), revokeBtn)
+		d.Revoked = revoked != ""
+		if d.LastSeen == "" {
+			d.LastSeen = "—"
 		}
+		devices = append(devices, d)
 	}
-
-	csrf := ""
-	if cookie, err := r.Cookie("csrf_token"); err == nil {
-		csrf = cookie.Value
+	if err := rows.Err(); err != nil {
+		s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/")
+		return
 	}
-	w.Write([]byte(userDashboardHTML(locale, html.EscapeString(username), deviceRows, csrf)))
+	flash := r.URL.Query().Get("error")
+	if flash != "error.invalidCredentials" {
+		flash = ""
+	}
+	s.renderPage(w, r, "dashboard", webPage{Title: "user.account", UserName: username, Email: email, Devices: devices, Flash: flash})
 }
 
 func (s *Server) handleUserWebLogout(w http.ResponseWriter, r *http.Request) {
@@ -362,38 +301,30 @@ func (s *Server) handleUserDevices(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-
-	rows, err := s.db.Query(`
-		SELECT d.id, d.name, COALESCE(d.client_version,''), COALESCE(d.last_seen,''), COALESCE(d.revoked_at,''), d.created_at
-		FROM server_devices d
-		JOIN server_user_devices ud ON ud.device_id = d.id
-		WHERE ud.user_id = ?
-		ORDER BY d.created_at DESC`, userID)
+	rows, err := s.db.Query(`SELECT d.id,d.name,COALESCE(d.client_version,''),COALESCE(d.last_seen,''),COALESCE(d.revoked_at,''),d.created_at FROM server_devices d JOIN server_user_devices ud ON ud.device_id=d.id WHERE ud.user_id=? ORDER BY d.created_at DESC`, userID)
 	if err != nil {
 		jsonInternalError(w, err)
 		return
 	}
 	defer rows.Close()
-
-	type devDTO struct {
-		ID            string `json:"id"`
-		Name          string `json:"name"`
-		ClientVersion string `json:"client_version"`
-		LastSeen      string `json:"last_seen"`
-		RevokedAt     string `json:"revoked_at"`
-		CreatedAt     string `json:"created_at"`
-	}
-	var devices []devDTO
+	var devices []map[string]string
 	for rows.Next() {
-		var d devDTO
-		rows.Scan(&d.ID, &d.Name, &d.ClientVersion, &d.LastSeen, &d.RevokedAt, &d.CreatedAt)
-		devices = append(devices, d)
+		var id, name, version, lastSeen, revoked, created string
+		if err := rows.Scan(&id, &name, &version, &lastSeen, &revoked, &created); err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+		devices = append(devices, map[string]string{"id": id, "name": name, "client_version": version, "last_seen": lastSeen, "revoked_at": revoked, "created_at": created})
+	}
+	if err := rows.Err(); err != nil {
+		jsonInternalError(w, err)
+		return
 	}
 	jsonOK(w, devices)
 }
 
-// handleUserWebDeviceAction is deliberately session/CSRF based. Browser UI
-// never receives a desktop device bearer token.
+// handleUserWebDeviceAction accepts the dashboard's regular form as well as
+// the existing JSON API. Both paths are session and CSRF protected.
 func (s *Server) handleUserWebDeviceAction(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w, http.MethodPost)
@@ -409,14 +340,21 @@ func (s *Server) handleUserWebDeviceAction(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	deviceID := strings.TrimSuffix(strings.TrimSuffix(path, "/revoke"), "/")
-	var req struct {
-		Password string `json:"password"`
+	password := ""
+	formRequest := strings.HasPrefix(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded")
+	if formRequest {
+		password = r.FormValue("password")
+	} else {
+		var req struct {
+			Password string `json:"password"`
+		}
+		if !decodeJSONBody(w, r, &req, s.cfg.Limits.MaxJSONBody) {
+			return
+		}
+		password = req.Password
 	}
-	if !decodeJSONBody(w, r, &req, s.cfg.Limits.MaxJSONBody) {
-		return
-	}
-	if req.Password == "" || !s.allowRate(w, r, "auth-test", session.SubjectID) {
-		if req.Password == "" {
+	if password == "" || !s.allowRate(w, r, "auth-test", session.SubjectID) {
+		if password == "" {
 			jsonErrCode(w, http.StatusBadRequest, "invalid_request", "password required")
 		}
 		return
@@ -426,8 +364,12 @@ func (s *Server) handleUserWebDeviceAction(w http.ResponseWriter, r *http.Reques
 		jsonInternalError(w, err)
 		return
 	}
-	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) != nil {
-		jsonErr(w, http.StatusForbidden, "wrong password")
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
+		if formRequest {
+			http.Redirect(w, r, "/dashboard?error=error.invalidCredentials", http.StatusSeeOther)
+		} else {
+			jsonErr(w, http.StatusForbidden, "wrong password")
+		}
 		return
 	}
 	var owner string
@@ -444,5 +386,9 @@ func (s *Server) handleUserWebDeviceAction(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.auditLog("device_revoked", session.SubjectID, deviceID, s.clientIP(r), "device revoked from web dashboard")
+	if formRequest {
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+		return
+	}
 	jsonOK(w, map[string]string{"status": "revoked"})
 }

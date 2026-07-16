@@ -1,0 +1,10 @@
+{{define "home"}}{{template "layout" .}}{{end}}
+{{define "content"}}
+<section class="hero card">
+  <p class="eyebrow">{{t .Locale "home.eyebrow"}}</p>
+  <h1>{{t .Locale "home.heading"}}</h1>
+  <p class="lead">{{t .Locale "home.description"}}</p>
+  <div class="actions"><a class="button primary" href="/login">{{t .Locale "home.login"}}</a>{{if .AllowRegistration}}<a class="button secondary" href="/register">{{t .Locale "home.register"}}</a>{{end}}</div>
+  <p class="muted">{{t .Locale "home.version"}} {{.Version}} · {{.BuildCommit}} · <span class="badge ok">{{.Status}}</span></p>
+</section>
+{{end}}

@@ -1,0 +1,2 @@
+{{define "error"}}{{template "layout" .}}{{end}}
+{{define "content"}}<section class="message-card card"><p class="eyebrow danger-text">{{t .Locale "error.label"}}</p><h1>{{t .Locale .Heading}}</h1><p class="lead">{{t .Locale .Message}}</p>{{if .BackURL}}<a class="button secondary" href="{{.BackURL}}">{{t .Locale "common.back"}}</a>{{end}}</section>{{end}}

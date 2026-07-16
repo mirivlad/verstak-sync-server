@@ -1,0 +1,2 @@
+{{define "message"}}{{template "layout" .}}{{end}}
+{{define "content"}}<section class="message-card card"><p class="eyebrow">Verstak Sync</p><h1>{{t .Locale .Heading}}</h1><p class="lead">{{t .Locale .Message}}</p>{{if .BackURL}}<a class="button primary" href="{{.BackURL}}">{{t .Locale "common.continue"}}</a>{{end}}</section>{{end}}

@@ -20,6 +20,7 @@ type Server struct {
 	blobsDir  string
 	mux       *http.ServeMux
 	limiter   *rateLimiter
+	web       *webRenderer
 	startedAt time.Time
 }
 
@@ -79,12 +80,18 @@ func NewServer(dbPath, dataDir string, cfg *Config) (*Server, error) {
 		return nil, err
 	}
 
+	web, err := newWebRenderer()
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("web templates: %w", err)
+	}
 	s := &Server{
 		db:        db,
 		dbPath:    dbPath,
 		cfg:       cfg,
 		blobsDir:  blobsDir,
 		limiter:   newRateLimiter(nil),
+		web:       web,
 		startedAt: time.Now().UTC(),
 	}
 	s.mux = http.NewServeMux()
@@ -96,7 +103,10 @@ func (s *Server) SetupRoutes() {
 }
 
 func (s *Server) locale() string {
-	return "ru"
+	if s != nil && s.cfg != nil && isSupportedWebLocale(s.cfg.Web.DefaultLocale) {
+		return s.cfg.Web.DefaultLocale
+	}
+	return "en"
 }
 
 func (s *Server) Close() error {
@@ -106,7 +116,7 @@ func (s *Server) Close() error {
 // Handler is the only HTTP entrypoint. Additional request security middleware
 // is composed here so tests and production use the same path.
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return securityHeaders(s.mux)
 }
 
 // HTTPServer creates a conservatively configured server suitable for running

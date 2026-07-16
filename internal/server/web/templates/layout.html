@@ -1,0 +1,35 @@
+{{define "layout"}}
+<!doctype html>
+<html lang="{{.Locale}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{t .Locale .Title}} · {{.ServerName}}</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="{{.ServerName}}"><img src="/static/logo.svg" alt="" width="28" height="28"><span>Verstak Sync</span></a>
+    <nav class="site-nav" aria-label="{{t .Locale "nav.primary"}}">
+      <a href="/login">{{t .Locale "nav.login"}}</a>
+      {{if .AllowRegistration}}<a href="/register">{{t .Locale "nav.register"}}</a>{{end}}
+    </nav>
+    <form class="locale-form" action="/locale" method="post" aria-label="{{t .Locale "locale.label"}}">
+      <input type="hidden" name="from" value="{{.CurrentURL}}">
+      {{if .CSRF}}<input type="hidden" name="csrf_token" value="{{.CSRF}}">{{end}}
+      <label class="sr-only" for="locale">{{t .Locale "locale.label"}}</label>
+      <select id="locale" name="locale" data-auto-submit>
+        <option value="system" {{if eq .LocalePreference "system"}}selected{{end}}>{{t .Locale "locale.system"}}</option>
+        <option value="ru" {{if eq .LocalePreference "ru"}}selected{{end}}>Русский</option>
+        <option value="en" {{if eq .LocalePreference "en"}}selected{{end}}>English</option>
+      </select>
+      <button class="sr-only" type="submit">{{t .Locale "locale.apply"}}</button>
+    </form>
+  </header>
+  <main class="page-shell">{{template "content" .}}</main>
+  <footer class="site-footer"><span>{{.ServerName}}</span><span>{{t .Locale "footer.localFirst"}}</span></footer>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
+{{end}}

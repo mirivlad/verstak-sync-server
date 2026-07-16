@@ -26,12 +26,21 @@ type Config struct {
 	TrustedProxies          []string    `yaml:"trusted_proxies,omitempty"`
 	PublicURL               string      `yaml:"public_url,omitempty"`
 	DevelopmentTokenLogging bool        `yaml:"development_token_logging,omitempty"`
+	Web                     WebConfig   `yaml:"web,omitempty"`
 	Limits                  Limits      `yaml:"limits,omitempty"`
 	Retention               Retention   `yaml:"retention,omitempty"`
 	Admin                   []AdminUser `yaml:"admin"`
 	mu                      sync.Mutex
 	path                    string
 	trustedProxyPrefixes    []netip.Prefix
+}
+
+// WebConfig intentionally contains only presentation policy. It never
+// duplicates transport limits or security configuration owned by the server.
+type WebConfig struct {
+	DefaultLocale     string `yaml:"default_locale,omitempty"`
+	AllowRegistration bool   `yaml:"allow_registration,omitempty"`
+	ServerName        string `yaml:"server_name,omitempty"`
 }
 
 // Retention controls data that has no role in reconstructing a vault. Sync
@@ -73,6 +82,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		Port:      47732,
 		Listen:    "127.0.0.1:47732",
+		Web:       WebConfig{DefaultLocale: "en", AllowRegistration: true, ServerName: "Verstak Sync Server"},
 		Limits:    defaultLimits(),
 		Retention: Retention{IdempotencyHours: 24, AuditDays: 90, TempUploadHours: 24},
 	}
@@ -150,6 +160,12 @@ func (c *Config) normalize() error {
 	}
 	if c.Retention.TempUploadHours <= 0 {
 		c.Retention.TempUploadHours = 24
+	}
+	if !isSupportedWebLocale(c.Web.DefaultLocale) {
+		c.Web.DefaultLocale = "en"
+	}
+	if strings.TrimSpace(c.Web.ServerName) == "" {
+		c.Web.ServerName = "Verstak Sync Server"
 	}
 	prefixes := make([]netip.Prefix, 0, len(c.TrustedProxies))
 	for _, raw := range c.TrustedProxies {

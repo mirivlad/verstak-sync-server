@@ -14,9 +14,8 @@ import (
 )
 
 func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/" {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write([]byte("Verstak Sync Server\n"))
+	if !strings.HasPrefix(r.URL.Path, "/api/") {
+		s.renderPageStatus(w, r, "error", webPage{Title: "error.label", Heading: "error.badRequest", Message: "error.tryAgain", BackURL: "/"}, http.StatusNotFound)
 		return
 	}
 	jsonErr(w, 404, "not found")

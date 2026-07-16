@@ -83,6 +83,13 @@ retention:
   idempotency_hours: 24
   audit_days: 90
   temp_upload_hours: 24
+web:
+  # Server default; visitors may choose System, Русский, or English in a cookie.
+  default_locale: en
+  # Set false for invite/admin-only installations.
+  allow_registration: true
+  # Product name rendered in the embedded web console.
+  server_name: Verstak Sync Server
 ```
 
 Production installs use:
@@ -216,6 +223,33 @@ Operational endpoints:
 - `GET /api/v1/health` - Server health and basic storage status
 - `/admin/...` - Admin web UI and admin JSON endpoints
 - `/register`, `/login`, `/dashboard`, `/forgot`, `/reset`, `/logout` - User web UI
+
+## Embedded web console
+
+The server embeds its public, account, and administrator interface in the Go
+binary. It has no CDN, npm build, external font, or remote analytics
+dependency. `/` is a localized public page; `/login`, `/register`, `/forgot`,
+and `/reset` use post/redirect/get flows. `/dashboard` lets a signed-in user
+review their own devices and revoke one only after entering their password.
+
+`/admin/login` opens the administrator console. Its sidebar provides overview,
+users, devices, vaults, storage, audit, SMTP settings, and diagnostics. User
+blocking is immediate; device revocation and SMTP changes require the current
+administrator password again. Admin HTML is deliberately a normal server
+rendered control plane; the existing `/admin/api/...` endpoints remain for
+automation.
+
+The locale resolver uses the `verstak_locale` HttpOnly/Lax cookie first. Its
+values are `ru`, `en`, or `system`; `system` uses `Accept-Language`, then
+`web.default_locale`, then English. The choice survives login and logout.
+Registration is controlled by `web.allow_registration`; when disabled the
+public registration page does not expose account creation.
+
+All browser mutations use POST and validate a server-side session plus CSRF
+token. The server returns security headers including a restrictive CSP,
+`frame-ancestors 'none'`, `nosniff`, and a same-origin referrer policy. The
+console must still be deployed behind the HTTPS reverse proxy described below:
+secure cookies are enabled when HTTPS is detected through a trusted proxy.
 
 Sync operations are generic records with `entity_type`, `entity_id`, `op_type`,
 `payload_json`, `device_id`, and sequencing metadata. A pairing token is bound
