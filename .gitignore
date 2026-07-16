@@ -2,6 +2,7 @@
 /server
 /verstak-sync-server
 *.exe
+/build/
 
 # Data directory
 server-data/

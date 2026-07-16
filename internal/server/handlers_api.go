@@ -2,12 +2,11 @@ package server
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"io"
+	"errors"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,11 +23,24 @@ func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, map[string]interface{}{
-		"status":  "ok",
-		"version": "verstak-server/v1",
-		"time":    time.Now().UTC().Format(time.RFC3339),
-	})
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	health := s.healthStatus(r.Context())
+	if health.Status != "ok" {
+		jsonOKStatus(w, http.StatusServiceUnavailable, health)
+		return
+	}
+	jsonOK(w, health)
+}
+
+func (s *Server) handleLiveness(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	jsonOK(w, map[string]interface{}{"status": "ok", "server_time": time.Now().UTC().Format(time.RFC3339)})
 }
 
 func (s *Server) handleClientPair(w http.ResponseWriter, r *http.Request) {
@@ -36,15 +48,7 @@ func (s *Server) handleClientPair(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 405, "POST required")
 		return
 	}
-	ip := r.RemoteAddr
-	if idx := strings.LastIndex(ip, ":"); idx >= 0 {
-		ip = ip[:idx]
-	}
-	if !s.pairLimit.allow(ip) {
-		s.auditLog("rate_limit_exceeded", "", "", ip, "pair rate limit exceeded")
-		jsonErr(w, 429, "too many attempts")
-		return
-	}
+	ip := s.clientIP(r)
 	var req struct {
 		Login         string `json:"login"`
 		Password      string `json:"password"`
@@ -52,12 +56,14 @@ func (s *Server) handleClientPair(w http.ResponseWriter, r *http.Request) {
 		ClientVersion string `json:"client_version"`
 		VaultID       string `json:"vault_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, 400, "bad json")
+	if !decodeJSONBody(w, r, &req, s.cfg.Limits.MaxJSONBody) {
 		return
 	}
 	if req.Login == "" || req.Password == "" {
 		jsonErr(w, 400, "login and password required")
+		return
+	}
+	if !s.allowRate(w, r, "pair", req.Login) {
 		return
 	}
 	req.VaultID = strings.TrimSpace(req.VaultID)
@@ -72,12 +78,16 @@ func (s *Server) handleClientPair(w http.ResponseWriter, r *http.Request) {
 	if req.DeviceName == "" {
 		req.DeviceName = "unknown"
 	}
+	if err := validatePairRequest(req.Login, req.DeviceName, req.ClientVersion, req.VaultID); err != nil {
+		jsonErrCode(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	var userID, hash string
 	var confirmed, blocked int
 	err := s.db.QueryRow("SELECT id, password_hash, confirmed, blocked FROM server_users WHERE username=? OR email=?",
 		req.Login, strings.ToLower(req.Login)).Scan(&userID, &hash, &confirmed, &blocked)
 	if err != nil {
-		s.auditLog("device_auth_failed", "", "", ip, "pair: user not found: "+req.Login)
+		s.auditLog("device_auth_failed", "", "", ip, "pair: user not found")
 		jsonErr(w, 401, "invalid credentials")
 		return
 	}
@@ -102,20 +112,33 @@ func (s *Server) handleClientPair(w http.ResponseWriter, r *http.Request) {
 	token, prefix, suffix := genDeviceToken()
 	tokenHash := sha256Hex(token)
 	now := time.Now().UTC().Format(time.RFC3339)
-	apiKey := make([]byte, 20)
-	rand.Read(apiKey)
-	_, err = s.db.Exec(`INSERT INTO server_devices
-		(id, name, api_key, token_hash, token_prefix, token_suffix, user_id, vault_id, client_version, last_ip, last_seen, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		deviceID, req.DeviceName, hex.EncodeToString(apiKey), tokenHash, prefix, suffix,
+	tx, err := s.db.Begin()
+	if err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`INSERT INTO server_devices
+		(id, name, api_key, token_hash, token_prefix, token_suffix, legacy_api_key, user_id, vault_id, client_version, last_ip, last_seen, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+		deviceID, req.DeviceName, "disabled:"+deviceID, tokenHash, prefix, suffix,
 		userID, req.VaultID, req.ClientVersion, ip, now, now)
 	if err != nil {
 		jsonInternalError(w, err)
 		return
 	}
-	s.db.Exec("INSERT OR IGNORE INTO server_user_devices (user_id, device_id) VALUES (?, ?)", userID, deviceID)
-	s.db.Exec("UPDATE server_users SET last_seen=? WHERE id=?", now, userID)
-	s.pairLimit.reset(ip)
+	if _, err := tx.Exec("INSERT OR IGNORE INTO server_user_devices (user_id, device_id) VALUES (?, ?)", userID, deviceID); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	if _, err := tx.Exec("UPDATE server_users SET last_seen=? WHERE id=?", now, userID); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
 	s.auditLog("device_paired", userID, deviceID, ip, "device paired: "+req.DeviceName)
 	jsonOK(w, map[string]interface{}{
 		"user_id":             userID,
@@ -135,12 +158,14 @@ func (s *Server) handleAuthTest(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, 400, "bad json")
+	if !decodeJSONBody(w, r, &req, s.cfg.Limits.MaxJSONBody) {
 		return
 	}
 	if req.Username == "" || req.Password == "" {
 		jsonErr(w, 400, "username and password required")
+		return
+	}
+	if !s.allowRate(w, r, "auth-test", req.Username) {
 		return
 	}
 	var hash string
@@ -171,21 +196,16 @@ func (s *Server) handleClientRevoke(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 405, "POST required")
 		return
 	}
-	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if tok == "" {
-		jsonErr(w, 401, "token required")
-		return
-	}
-	hash := sha256Hex(tok)
-	var deviceID, userID string
-	err := s.db.QueryRow("SELECT id, user_id FROM server_devices WHERE token_hash=?", hash).Scan(&deviceID, &userID)
-	if err != nil {
-		jsonErr(w, 401, "invalid token")
+	device, ok := s.authenticateDevice(w, r)
+	if !ok {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	s.db.Exec("UPDATE server_devices SET revoked_at=? WHERE id=?", now, deviceID)
-	s.auditLog("device_revoked", userID, deviceID, r.RemoteAddr, "device revoked by user")
+	if err := s.revokeDevice(device.DeviceID, now); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	s.auditLog("device_revoked", device.UserID, device.DeviceID, s.clientIP(r), "device revoked by user")
 	jsonOK(w, map[string]string{"status": "revoked"})
 }
 
@@ -194,32 +214,27 @@ func (s *Server) handleClientRevokeDevice(w http.ResponseWriter, r *http.Request
 		jsonErr(w, 405, "POST required")
 		return
 	}
-	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if tok == "" {
-		jsonErr(w, 401, "token required")
+	device, ok := s.authenticateDevice(w, r)
+	if !ok || device.UserID == "" {
 		return
 	}
-	hash := sha256Hex(tok)
-	var curUserID string
-	err := s.db.QueryRow("SELECT user_id FROM server_devices WHERE token_hash=?", hash).Scan(&curUserID)
-	if err != nil || curUserID == "" {
-		jsonErr(w, 401, "invalid token")
-		return
-	}
+	curUserID := device.UserID
 	var req struct {
 		DeviceID string `json:"device_id"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, 400, "invalid JSON")
+	if !decodeJSONBody(w, r, &req, s.cfg.Limits.MaxJSONBody) {
 		return
 	}
 	if req.DeviceID == "" || req.Password == "" {
 		jsonErr(w, 400, "device_id and password required")
 		return
 	}
+	if !s.allowRate(w, r, "auth-test", curUserID) {
+		return
+	}
 	var pwHash string
-	err = s.db.QueryRow("SELECT password_hash FROM server_users WHERE id=?", curUserID).Scan(&pwHash)
+	err := s.db.QueryRow("SELECT password_hash FROM server_users WHERE id=?", curUserID).Scan(&pwHash)
 	if err != nil {
 		jsonErr(w, 403, "access denied")
 		return
@@ -239,21 +254,26 @@ func (s *Server) handleClientRevokeDevice(w http.ResponseWriter, r *http.Request
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	s.db.Exec("UPDATE server_devices SET revoked_at=? WHERE id=?", now, req.DeviceID)
-	s.auditLog("device_revoked", curUserID, req.DeviceID, r.RemoteAddr, "device revoked via API")
+	if err := s.revokeDevice(req.DeviceID, now); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	s.auditLog("device_revoked", curUserID, req.DeviceID, s.clientIP(r), "device revoked via API")
 	jsonOK(w, map[string]string{"status": "revoked"})
 }
 
 func (s *Server) handleClientMe(w http.ResponseWriter, r *http.Request) {
-	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if tok == "" {
-		jsonErr(w, 401, "token required")
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
-	hash := sha256Hex(tok)
+	device, ok := s.authenticateDevice(w, r)
+	if !ok {
+		return
+	}
 	var deviceID, userID, name, clientVer, lastSeen, revokedAt, createdAt string
 	err := s.db.QueryRow(`SELECT d.id, d.user_id, d.name, COALESCE(d.client_version,''), COALESCE(d.last_seen,''), COALESCE(d.revoked_at,''), d.created_at
-		FROM server_devices d WHERE d.token_hash=?`, hash).
+		FROM server_devices d WHERE d.id=?`, device.DeviceID).
 		Scan(&deviceID, &userID, &name, &clientVer, &lastSeen, &revokedAt, &createdAt)
 	if err != nil {
 		jsonErr(w, 401, "invalid token")
@@ -284,8 +304,7 @@ func (s *Server) handleDeviceRegister(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		VaultID  string `json:"vault_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, 400, "invalid JSON")
+	if !decodeJSONBody(w, r, &req, s.cfg.Limits.MaxJSONBody) {
 		return
 	}
 	if req.Name == "" {
@@ -294,6 +313,13 @@ func (s *Server) handleDeviceRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Username == "" || req.Password == "" {
 		jsonErr(w, 401, "username and password required")
+		return
+	}
+	if !s.allowRate(w, r, "device-register", req.Username) {
+		return
+	}
+	if err := validatePairRequest(req.Username, req.Name, "", req.VaultID); err != nil {
+		jsonErrCode(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	req.VaultID = strings.TrimSpace(req.VaultID)
@@ -325,61 +351,86 @@ func (s *Server) handleDeviceRegister(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 401, "invalid credentials")
 		return
 	}
-	b := make([]byte, 20)
+	b := make([]byte, 12)
 	rand.Read(b)
-	apiKey := hex.EncodeToString(b)
-	deviceID := apiKey[:12]
+	deviceID := "dev_" + hex.EncodeToString(b)
+	token, prefix, suffix := genDeviceToken()
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = s.db.Exec(
-		"INSERT INTO server_devices (id, name, api_key, user_id, vault_id, last_seen, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		deviceID, req.Name, apiKey, userID, req.VaultID, now, now,
+	tx, err := s.db.Begin()
+	if err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(
+		"INSERT INTO server_devices (id, name, api_key, token_hash, token_prefix, token_suffix, legacy_api_key, user_id, vault_id, last_seen, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+		deviceID, req.Name, "disabled:"+deviceID, sha256Hex(token), prefix, suffix, userID, req.VaultID, now, now,
 	)
 	if err != nil {
 		jsonInternalError(w, err)
 		return
 	}
-	s.db.Exec("INSERT OR IGNORE INTO server_user_devices (user_id, device_id) VALUES (?, ?)", userID, deviceID)
+	if _, err := tx.Exec("INSERT OR IGNORE INTO server_user_devices (user_id, device_id) VALUES (?, ?)", userID, deviceID); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
 	jsonOK(w, map[string]interface{}{
-		"device_id": deviceID,
-		"api_key":   apiKey,
+		"device_id":    deviceID,
+		"device_token": token,
 	})
 }
 
 func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		methodNotAllowed(w, "POST")
+		return
+	}
 	scope, ok := s.requireSyncScope(w, r)
 	if !ok {
 		return
 	}
-	if r.Method != "POST" {
-		jsonErr(w, 405, "POST required")
+	var req syncPushRequest
+	if !decodeJSONBody(w, r, &req, s.cfg.Limits.MaxJSONBody) {
 		return
 	}
-	var req struct {
-		DeviceID       string `json:"device_id"`
-		IdempotencyKey string `json:"idempotency_key"`
-		Ops            []struct {
-			OpID              string `json:"op_id"`
-			EntityType        string `json:"entity_type"`
-			EntityID          string `json:"entity_id"`
-			OpType            string `json:"op_type"`
-			PayloadJSON       string `json:"payload_json"`
-			ClientSequence    int    `json:"client_sequence"`
-			LastSeenServerSeq int    `json:"last_seen_server_seq"`
-			CreatedAt         string `json:"created_at"`
-		} `json:"ops"`
+	if code, message := s.validateSyncPush(req); code != "" {
+		status := http.StatusBadRequest
+		if code == "too_many_operations" || code == "payload_too_large" {
+			status = http.StatusRequestEntityTooLarge
+		}
+		jsonErrCode(w, status, code, message)
+		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, 400, "invalid JSON")
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	defer tx.Rollback()
+	if code, message, err := validateScopedBlobReferences(tx, scope, req.Ops); err != nil {
+		jsonInternalError(w, err)
+		return
+	} else if code != "" {
+		jsonErrCode(w, http.StatusBadRequest, code, message)
 		return
 	}
 	if req.IdempotencyKey != "" {
 		var cachedJSON string
-		err := s.db.QueryRow(`SELECT response_json FROM server_idempotency_keys
+		err := tx.QueryRow(`SELECT response_json FROM server_idempotency_keys
 			WHERE user_id=? AND vault_id=? AND idempotency_key=?`,
 			scope.UserID, scope.VaultID, req.IdempotencyKey).Scan(&cachedJSON)
 		if err == nil {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(cachedJSON))
+			_, _ = w.Write([]byte(cachedJSON))
+			return
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			jsonInternalError(w, err)
 			return
 		}
 	}
@@ -387,55 +438,82 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 	var accepted []string
 	var conflicts []map[string]interface{}
 	for _, op := range req.Ops {
-		if op.OpID == "" || op.EntityType == "" || op.EntityID == "" || op.OpType == "" {
-			continue
-		}
 		if op.LastSeenServerSeq > 0 {
-			conflictRows, err := s.db.Query(`
+			conflictRows, err := tx.Query(`
 				SELECT op_id, device_id, op_type, server_sequence FROM server_ops
 				WHERE user_id=? AND vault_id=? AND entity_type=? AND entity_id=? AND device_id!=?
 				  AND server_sequence > ? AND op_type != 'delete'
 				ORDER BY server_sequence`, scope.UserID, scope.VaultID, op.EntityType, op.EntityID, scope.DeviceID, op.LastSeenServerSeq)
-			if err == nil {
-				for conflictRows.Next() {
-					var cOpID, cDevID, cOpType string
-					var cSeq int
-					conflictRows.Scan(&cOpID, &cDevID, &cOpType, &cSeq)
-					conflicts = append(conflicts, map[string]interface{}{
-						"op_id":           cOpID,
-						"device_id":       cDevID,
-						"op_type":         cOpType,
-						"server_sequence": cSeq,
-						"entity_type":     op.EntityType,
-						"entity_id":       op.EntityID,
-					})
+			if err != nil {
+				jsonInternalError(w, err)
+				return
+			}
+			for conflictRows.Next() {
+				var cOpID, cDevID, cOpType string
+				var cSeq int
+				if err := conflictRows.Scan(&cOpID, &cDevID, &cOpType, &cSeq); err != nil {
+					_ = conflictRows.Close()
+					jsonInternalError(w, err)
+					return
 				}
-				conflictRows.Close()
+				conflicts = append(conflicts, map[string]interface{}{
+					"op_id":           cOpID,
+					"device_id":       cDevID,
+					"op_type":         cOpType,
+					"server_sequence": cSeq,
+					"entity_type":     op.EntityType,
+					"entity_id":       op.EntityID,
+				})
+			}
+			if err := conflictRows.Err(); err != nil {
+				_ = conflictRows.Close()
+				jsonInternalError(w, err)
+				return
+			}
+			if err := conflictRows.Close(); err != nil {
+				jsonInternalError(w, err)
+				return
 			}
 		}
-		res, err := s.db.Exec(
+		res, err := tx.Exec(
 			`INSERT OR IGNORE INTO server_ops (op_id, server_sequence, user_id, vault_id, device_id, entity_type, entity_id, op_type, payload_json, idempotency_key, client_sequence, last_seen_server_seq, created_at, pushed_at)
 			 VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			op.OpID, scope.UserID, scope.VaultID, scope.DeviceID, op.EntityType, op.EntityID, op.OpType, op.PayloadJSON,
 			req.IdempotencyKey, op.ClientSequence, op.LastSeenServerSeq, op.CreatedAt, now,
 		)
 		if err != nil {
-			continue
+			jsonInternalError(w, err)
+			return
 		}
-		n, _ := res.RowsAffected()
+		n, err := res.RowsAffected()
+		if err != nil {
+			jsonInternalError(w, err)
+			return
+		}
 		if n == 0 {
 			continue
 		}
-		seqRes, err := s.db.Exec("INSERT INTO server_revisions (op_id, device_id) VALUES (?, ?)", op.OpID, scope.DeviceID)
+		seqRes, err := tx.Exec("INSERT INTO server_revisions (op_id, device_id) VALUES (?, ?)", op.OpID, scope.DeviceID)
 		if err != nil {
-			continue
+			jsonInternalError(w, err)
+			return
 		}
-		seq, _ := seqRes.LastInsertId()
-		s.db.Exec("UPDATE server_ops SET server_sequence=? WHERE op_id=?", seq, op.OpID)
+		seq, err := seqRes.LastInsertId()
+		if err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+		if _, err := tx.Exec("UPDATE server_ops SET server_sequence=? WHERE op_id=?", seq, op.OpID); err != nil {
+			jsonInternalError(w, err)
+			return
+		}
 		if op.OpType == "delete" {
-			s.db.Exec(`INSERT OR REPLACE INTO server_tombstones
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO server_tombstones
 				(user_id, vault_id, entity_type, entity_id, op_id, deleted_at) VALUES (?, ?, ?, ?, ?, ?)`,
-				scope.UserID, scope.VaultID, op.EntityType, op.EntityID, op.OpID, now)
+				scope.UserID, scope.VaultID, op.EntityType, op.EntityID, op.OpID, now); err != nil {
+				jsonInternalError(w, err)
+				return
+			}
 		}
 		accepted = append(accepted, op.OpID)
 	}
@@ -445,39 +523,54 @@ func (s *Server) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 		"conflicts": conflicts,
 	}
 	if req.IdempotencyKey != "" {
-		if respJSON, err := json.Marshal(resp); err == nil {
-			s.db.Exec(`INSERT OR IGNORE INTO server_idempotency_keys
-				(user_id, vault_id, idempotency_key, response_json, created_at) VALUES (?, ?, ?, ?, ?)`,
-				scope.UserID, scope.VaultID, req.IdempotencyKey, string(respJSON), now)
+		respJSON, err := json.Marshal(resp)
+		if err != nil {
+			jsonInternalError(w, err)
+			return
 		}
+		if _, err := tx.Exec(`INSERT INTO server_idempotency_keys
+			(user_id, vault_id, idempotency_key, response_json, created_at) VALUES (?, ?, ?, ?, ?)`,
+			scope.UserID, scope.VaultID, req.IdempotencyKey, string(respJSON), now); err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		jsonInternalError(w, err)
+		return
 	}
 	jsonOK(w, resp)
 }
 
 func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		methodNotAllowed(w, "POST")
+		return
+	}
 	scope, ok := s.requireSyncScope(w, r)
 	if !ok {
 		return
 	}
-	if r.Method != "POST" {
-		jsonErr(w, 405, "POST required")
+	var req syncPullRequest
+	if !decodeJSONBody(w, r, &req, s.cfg.Limits.MaxJSONBody) {
 		return
 	}
-	var req struct {
-		SinceSequence int `json:"since_sequence"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, 400, "invalid JSON")
+	if req.SinceSequence < 0 || req.PageLimit < 0 {
+		jsonErrCode(w, http.StatusBadRequest, "invalid_request", "sequence and page_limit must be non-negative")
 		return
 	}
+	pageLimit := s.pullPageLimit(req.PageLimit)
 	var serverSeq int
-	s.db.QueryRow(`SELECT COALESCE(MAX(server_sequence), 0) FROM server_ops
-		WHERE user_id=? AND vault_id=?`, scope.UserID, scope.VaultID).Scan(&serverSeq)
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(server_sequence), 0) FROM server_ops
+		WHERE user_id=? AND vault_id=?`, scope.UserID, scope.VaultID).Scan(&serverSeq); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
 	rows, err := s.db.Query(`
 		SELECT op_id, server_sequence, device_id, entity_type, entity_id, op_type, payload_json, created_at
 		FROM server_ops
 		WHERE user_id=? AND vault_id=? AND server_sequence > ? AND server_sequence IS NOT NULL
-		ORDER BY server_sequence`, scope.UserID, scope.VaultID, req.SinceSequence)
+		ORDER BY server_sequence LIMIT ?`, scope.UserID, scope.VaultID, req.SinceSequence, pageLimit+1)
 	if err != nil {
 		jsonInternalError(w, err)
 		return
@@ -493,81 +586,47 @@ func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
 		PayloadJSON    string `json:"payload_json"`
 		CreatedAt      string `json:"created_at"`
 	}
-	ops := []opDTO{}
+	ops := make([]opDTO, 0, pageLimit)
 	for rows.Next() {
 		var o opDTO
 		if err := rows.Scan(&o.OpID, &o.ServerSequence, &o.DeviceID, &o.EntityType, &o.EntityID, &o.OpType, &o.PayloadJSON, &o.CreatedAt); err != nil {
-			continue
+			jsonInternalError(w, err)
+			return
 		}
 		ops = append(ops, o)
 	}
+	if err := rows.Err(); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	hasMore := len(ops) > pageLimit
+	if hasMore {
+		ops = ops[:pageLimit]
+	}
+	pageLastSequence := req.SinceSequence
+	if len(ops) > 0 {
+		pageLastSequence = ops[len(ops)-1].ServerSequence
+	}
 	jsonOK(w, map[string]interface{}{
-		"server_sequence": serverSeq,
-		"ops":             ops,
+		"server_sequence":    serverSeq,
+		"page_last_sequence": pageLastSequence,
+		"has_more":           hasMore,
+		"ops":                ops,
 	})
 }
 
 func (s *Server) handleBlobs(w http.ResponseWriter, r *http.Request) {
-	_, _, ok := s.requireAuth(w, r)
+	scope, ok := s.requireSyncScope(w, r)
 	if !ok {
 		return
 	}
 	switch r.Method {
 	case "POST":
-		if err := r.ParseMultipartForm(200 << 20); err != nil {
-			jsonErr(w, 400, "invalid multipart request")
-			return
-		}
-		file, header, err := r.FormFile("file")
-		if err != nil {
-			jsonErr(w, 400, "file field required")
-			return
-		}
-		defer file.Close()
-		data, err := io.ReadAll(file)
-		if err != nil {
-			jsonErr(w, 500, "read error")
-			return
-		}
-		hash := sha256Hex(string(data))
-		blobDir := filepath.Join(s.blobsDir, hash[:2], hash[2:4])
-		if err := os.MkdirAll(blobDir, 0750); err != nil {
-			jsonErr(w, 500, "mkdir error")
-			return
-		}
-		blobPath := filepath.Join(blobDir, hash)
-		if err := os.WriteFile(blobPath, data, 0640); err != nil {
-			jsonErr(w, 500, "write error")
-			return
-		}
-		_ = header
-		now := time.Now().UTC().Format(time.RFC3339)
-		s.db.Exec("INSERT OR IGNORE INTO server_blobs (sha256, size, created_at) VALUES (?, ?, ?)",
-			hash, len(data), now)
-		jsonOK(w, map[string]interface{}{
-			"sha256": hash,
-			"size":   len(data),
-		})
+		s.handleBlobUpload(w, r, scope)
 	case "GET":
 		shaHex := strings.TrimPrefix(r.URL.Path, "/api/v1/blobs/")
-		if len(shaHex) != 64 {
-			jsonErr(w, 400, "invalid SHA-256")
-			return
-		}
-		blobPath := filepath.Join(s.blobsDir, shaHex[:2], shaHex[2:4], shaHex)
-		if _, err := os.Stat(blobPath); os.IsNotExist(err) {
-			jsonErr(w, 404, "blob not found")
-			return
-		}
-		data, err := os.ReadFile(blobPath)
-		if err != nil {
-			jsonErr(w, 500, "read error")
-			return
-		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Disposition", "attachment; filename=\""+shaHex+"\"")
-		w.Write(data)
+		s.handleBlobDownload(w, r, scope, shaHex)
 	default:
-		jsonErr(w, 405, "method not allowed")
+		methodNotAllowed(w, "GET", "POST")
 	}
 }

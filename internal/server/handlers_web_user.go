@@ -16,17 +16,11 @@ import (
 )
 
 func (s *Server) requireUserWeb(w http.ResponseWriter, r *http.Request) (string, bool) {
-	cookie, err := r.Cookie("user_session")
-	if err != nil {
-		http.Redirect(w, r, "/login", http.StatusFound)
-		return "", false
-	}
-	userID, ok := s.userTokens.Check(cookie.Value)
+	session, ok := s.requireSession(w, r, sessionScopeUser)
 	if !ok {
-		http.Redirect(w, r, "/login", http.StatusFound)
 		return "", false
 	}
-	return userID, true
+	return session.SubjectID, true
 }
 
 func (s *Server) handleUserWebRegister(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +43,9 @@ func (s *Server) handleUserWebRegister(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(400)
 			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "server.allFieldsRequired"), "/register")))
+			return
+		}
+		if !s.allowRate(w, r, "register", email) {
 			return
 		}
 		if err := validatePassword(password); err != "" {
@@ -84,12 +81,11 @@ func (s *Server) handleUserWebRegister(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		tok := make([]byte, 24)
-		rand.Read(tok)
-		tokenStr := hex.EncodeToString(tok)
-		exp := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
-		s.db.Exec("INSERT INTO server_email_tokens (token, user_id, purpose, expires_at, created_at) VALUES (?, ?, 'confirm', ?, ?)",
-			tokenStr, userID, exp, now)
+		tokenStr, err := issueEmailToken(s.db, userID, "confirm", 48*time.Hour)
+		if err != nil {
+			jsonInternalError(w, err)
+			return
+		}
 		host := s.smtpGet("smtp_host")
 		if host != "" {
 			srvURL := s.smtpGet("server_url")
@@ -103,15 +99,11 @@ func (s *Server) handleUserWebRegister(w http.ResponseWriter, r *http.Request) {
 			if err := s.smtpSend(email, t(locale, "server.emailConfirmSubject"), body); err != nil {
 				log.Printf("register web: failed to send confirm email: %v", err)
 			}
-		} else {
-			log.Printf("register web: SMTP not configured, confirmation token=%s for user %s", tokenStr, username)
+		} else if s.cfg.DevelopmentTokenLogging {
+			log.Printf("development confirmation token for user %s: %s", username, tokenStr)
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		regMsg := registrationOKHTML(locale)
-		if host == "" {
-			regMsg = registrationAutoHTML(locale)
-		}
-		w.Write([]byte(regMsg))
+		w.Write([]byte(registrationOKHTML(locale)))
 	default:
 		jsonErr(w, 405, "method not allowed")
 	}
@@ -134,6 +126,9 @@ func (s *Server) handleUserWebForgot(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "server.needEmail"), "/forgot")))
 			return
 		}
+		if !s.allowRate(w, r, "forgot", email) {
+			return
+		}
 		var userID string
 		err := s.db.QueryRow("SELECT id FROM server_users WHERE email=?", email).Scan(&userID)
 		if err != nil {
@@ -141,13 +136,11 @@ func (s *Server) handleUserWebForgot(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(forgotSentHTML(locale)))
 			return
 		}
-		tok := make([]byte, 24)
-		rand.Read(tok)
-		tokenStr := hex.EncodeToString(tok)
-		exp := time.Now().Add(1 * time.Hour).UTC().Format(time.RFC3339)
-		now := time.Now().UTC().Format(time.RFC3339)
-		s.db.Exec("INSERT INTO server_email_tokens (token, user_id, purpose, expires_at, created_at) VALUES (?, ?, 'reset', ?, ?)",
-			tokenStr, userID, exp, now)
+		tokenStr, err := issueEmailToken(s.db, userID, "reset", time.Hour)
+		if err != nil {
+			jsonInternalError(w, err)
+			return
+		}
 		host := s.smtpGet("smtp_host")
 		if host != "" {
 			srvURL := s.smtpGet("server_url")
@@ -159,8 +152,8 @@ func (s *Server) handleUserWebForgot(w http.ResponseWriter, r *http.Request) {
 			if err := s.smtpSend(email, t(locale, "server.emailResetSubject"), body); err != nil {
 				log.Printf("forgot web: failed to send reset email: %v", err)
 			}
-		} else {
-			log.Printf("forgot web: SMTP not configured, reset token=%s for email %s", tokenStr, email)
+		} else if s.cfg.DevelopmentTokenLogging {
+			log.Printf("development reset token requested for %s: %s", email, tokenStr)
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(forgotSentHTML(locale)))
@@ -179,8 +172,8 @@ func (s *Server) handleUserWebReset(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var userID, expiresAt string
-		err := s.db.QueryRow("SELECT user_id, expires_at FROM server_email_tokens WHERE token=? AND purpose='reset'",
-			token).Scan(&userID, &expiresAt)
+		err := s.db.QueryRow("SELECT user_id, expires_at FROM server_email_tokens WHERE token_hash=? AND purpose='reset'",
+			emailTokenHash(token)).Scan(&userID, &expiresAt)
 		if err != nil {
 			http.Redirect(w, r, "/forgot", http.StatusFound)
 			return
@@ -204,6 +197,9 @@ func (s *Server) handleUserWebReset(w http.ResponseWriter, r *http.Request) {
 		if token == "" || newPass == "" || confirm == "" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Write([]byte(errorPageHTML(locale, t(locale, "common.error"), t(locale, "server.allFieldsRequired"), "/forgot")))
+			return
+		}
+		if !s.allowRate(w, r, "reset", "") {
 			return
 		}
 		if err := validatePassword(newPass); err != "" {
@@ -248,6 +244,9 @@ func (s *Server) handleUserWebLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		username := r.FormValue("username")
 		password := r.FormValue("password")
+		if !s.allowRate(w, r, "login", username) {
+			return
+		}
 		var userID, hash string
 		var confirmed, blocked int
 		err := s.db.QueryRow("SELECT id, password_hash, confirmed, blocked FROM server_users WHERE username=? OR email=?",
@@ -258,12 +257,12 @@ func (s *Server) handleUserWebLogin(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(errorPageHTML(locale, "401 Unauthorized", "401 Unauthorized", "/login")))
 			return
 		}
-		tok := s.userTokens.Create(userID)
-		http.SetCookie(w, &http.Cookie{
-			Name: "user_session", Value: tok, Path: "/",
-			HttpOnly: true, SameSite: http.SameSiteLaxMode,
-			MaxAge: 86400,
-		})
+		tok, csrf, err := s.createSession(sessionScopeUser, userID)
+		if err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+		s.setSessionCookies(w, r, sessionScopeUser, tok, csrf)
 		http.Redirect(w, r, "/dashboard", http.StatusFound)
 	default:
 		jsonErr(w, 405, "method not allowed")
@@ -329,18 +328,36 @@ func (s *Server) handleUserDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Write([]byte(userDashboardHTML(locale, html.EscapeString(username), deviceRows)))
+	csrf := ""
+	if cookie, err := r.Cookie("csrf_token"); err == nil {
+		csrf = cookie.Value
+	}
+	w.Write([]byte(userDashboardHTML(locale, html.EscapeString(username), deviceRows, csrf)))
 }
 
 func (s *Server) handleUserWebLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name: "user_session", Value: "", Path: "/",
-		HttpOnly: true, MaxAge: -1,
-	})
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if !s.requireUserMutation(w, r) {
+		return
+	}
+	if cookie, err := r.Cookie("user_session"); err == nil {
+		if err := s.deleteSession(cookie.Value); err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+	}
+	s.clearSessionCookies(w, r, sessionScopeUser)
 	http.Redirect(w, r, "/login", http.StatusFound)
 }
 
 func (s *Server) handleUserDevices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
 	userID, ok := s.requireUserWeb(w, r)
 	if !ok {
 		return
@@ -373,4 +390,59 @@ func (s *Server) handleUserDevices(w http.ResponseWriter, r *http.Request) {
 		devices = append(devices, d)
 	}
 	jsonOK(w, devices)
+}
+
+// handleUserWebDeviceAction is deliberately session/CSRF based. Browser UI
+// never receives a desktop device bearer token.
+func (s *Server) handleUserWebDeviceAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	session, ok := s.requireSession(w, r, sessionScopeUser)
+	if !ok || !s.verifyCSRF(w, r, session) {
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/user/devices/")
+	if !strings.HasSuffix(path, "/revoke") {
+		jsonErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	deviceID := strings.TrimSuffix(strings.TrimSuffix(path, "/revoke"), "/")
+	var req struct {
+		Password string `json:"password"`
+	}
+	if !decodeJSONBody(w, r, &req, s.cfg.Limits.MaxJSONBody) {
+		return
+	}
+	if req.Password == "" || !s.allowRate(w, r, "auth-test", session.SubjectID) {
+		if req.Password == "" {
+			jsonErrCode(w, http.StatusBadRequest, "invalid_request", "password required")
+		}
+		return
+	}
+	var hash string
+	if err := s.db.QueryRow("SELECT password_hash FROM server_users WHERE id=?", session.SubjectID).Scan(&hash); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) != nil {
+		jsonErr(w, http.StatusForbidden, "wrong password")
+		return
+	}
+	var owner string
+	if err := s.db.QueryRow("SELECT user_id FROM server_devices WHERE id=?", deviceID).Scan(&owner); err != nil {
+		jsonErr(w, http.StatusNotFound, "device not found")
+		return
+	}
+	if owner != session.SubjectID {
+		jsonErr(w, http.StatusForbidden, "device does not belong to you")
+		return
+	}
+	if err := s.revokeDevice(deviceID, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	s.auditLog("device_revoked", session.SubjectID, deviceID, s.clientIP(r), "device revoked from web dashboard")
+	jsonOK(w, map[string]string{"status": "revoked"})
 }

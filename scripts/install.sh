@@ -1,113 +1,89 @@
 #!/bin/sh
-#
-# install.sh — установка Verstak Sync Server
-#
-# Использование:
-#   sudo ./install.sh --port 47732 --user verstak --admin-user admin --admin-pass secret
-#
-# Флаги:
-#   --port         Порт сервера (по умолчанию: 47732)
-#   --user         Системный пользователь (по умолчанию: verstak)
-#   --admin-user   Логин администратора (обязательный)
-#   --admin-pass   Пароль администратора (обязательный)
-#   --bin          Путь к бинарнику (по умолчанию: ./verstak-sync-server)
-#
+# Install a locally built Verstak Sync Server without exposing an admin
+# password through argv or the installation log.
+set -eu
+umask 077
 
-set -e
-
-# Defaults
-PORT="${VERSTAK_PORT:-47732}"
+LISTEN="${VERSTAK_LISTEN:-127.0.0.1:47732}"
 USER="verstak"
 ADMIN_USER=""
-ADMIN_PASS=""
+ADMIN_PASS_FILE=""
 BIN="./verstak-sync-server"
 
-# Parse flags
-while [ $# -gt 0 ]; do
+while [ "$#" -gt 0 ]; do
     case "$1" in
-        --port) PORT="$2"; shift 2 ;;
+        --listen) LISTEN="$2"; shift 2 ;;
+        --port) LISTEN="127.0.0.1:$2"; shift 2 ;; # compatibility, still loopback
         --user) USER="$2"; shift 2 ;;
         --admin-user) ADMIN_USER="$2"; shift 2 ;;
-        --admin-pass) ADMIN_PASS="$2"; shift 2 ;;
+        --admin-pass-file) ADMIN_PASS_FILE="$2"; shift 2 ;;
         --bin) BIN="$2"; shift 2 ;;
-        *) echo "Unknown: $1"; exit 1 ;;
+        *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
 
-if [ -z "$ADMIN_USER" ] || [ -z "$ADMIN_PASS" ]; then
-    echo "Usage: $0 --admin-user USER --admin-pass PASS [--port PORT] [--user USER]"
-    exit 1
+if [ -z "$ADMIN_USER" ]; then
+    echo "Usage: $0 --admin-user USER [--admin-pass-file FILE] [--listen 127.0.0.1:47732]" >&2
+    exit 2
 fi
-
 if [ "$(id -u)" -ne 0 ]; then
-    echo "This script must be run as root (sudo)."
+    echo "This script must be run as root (sudo)." >&2
+    exit 1
+fi
+if [ ! -f "$BIN" ]; then
+    echo "Binary not found: $BIN. Build it first with ./scripts/build.sh" >&2
     exit 1
 fi
 
-echo "=== Verstak Sync Server Installation ==="
-echo "Port:        $PORT"
-echo "User:        $USER"
-echo "Admin:       $ADMIN_USER"
-echo "Binary:      $BIN"
-echo ""
+PASS_TMP="$(mktemp /tmp/verstak-admin-pass.XXXXXX)"
+trap 'rm -f "$PASS_TMP"' EXIT HUP INT TERM
+if [ -n "$ADMIN_PASS_FILE" ]; then
+    if [ ! -r "$ADMIN_PASS_FILE" ]; then
+        echo "Admin password file is not readable" >&2
+        exit 1
+    fi
+    cp "$ADMIN_PASS_FILE" "$PASS_TMP"
+else
+    printf 'Initial admin password: ' >&2
+    stty -echo
+    IFS= read -r ADMIN_PASS
+    stty echo
+    printf '\n' >&2
+    printf '%s\n' "$ADMIN_PASS" > "$PASS_TMP"
+    unset ADMIN_PASS
+fi
 
-# 1. Create system user if not exists.
+INSTALL_DIR="/opt/verstak-sync-server"
+DATA_DIR="/var/lib/verstak-sync-server"
+ENV_DIR="/etc/verstak-server"
+install -d -m 0755 "$INSTALL_DIR"
+install -m 0755 "$BIN" "$INSTALL_DIR/verstak-sync-server"
+
 if ! id -u "$USER" >/dev/null 2>&1; then
-    echo "Creating user: $USER"
     useradd --system --no-create-home --shell /usr/sbin/nologin "$USER"
 fi
+install -d -o "$USER" -g "$USER" -m 0750 "$DATA_DIR"
+chown "$USER:$USER" "$PASS_TMP"
 
-# 2. Install binary.
-INSTALL_DIR="/opt/verstak-sync-server"
-if [ ! -f "$BIN" ]; then
-    echo "Binary not found: $BIN. Build it first: go build -o $BIN ./cmd/server/"
-    exit 1
-fi
-echo "Installing binary to $INSTALL_DIR"
-mkdir -p "$INSTALL_DIR"
-cp "$BIN" "$INSTALL_DIR/verstak-sync-server"
-chmod 755 "$INSTALL_DIR/verstak-sync-server"
-
-# 3. Create data directory.
-DATA_DIR="/var/lib/verstak-sync-server"
-echo "Creating $DATA_DIR"
-mkdir -p "$DATA_DIR"
-chown "$USER:$USER" "$DATA_DIR"
-chmod 750 "$DATA_DIR"
-
-# 4. Set up admin user (first run).
-echo "Setting up admin user"
-"$INSTALL_DIR/verstak-sync-server" \
-    --port "$PORT" \
-    --data "$DATA_DIR" \
-    --admin-user "$ADMIN_USER" \
-    --admin-pass "$ADMIN_PASS" &
+# Initialize config as the service account. The process only receives the path
+# to a 0600 temporary file, never password text in argv.
+runuser -u "$USER" -- "$INSTALL_DIR/verstak-sync-server" \
+    --data "$DATA_DIR" --listen "$LISTEN" --admin-user "$ADMIN_USER" \
+    --admin-pass-file "$PASS_TMP" >/dev/null 2>&1 &
 SERVER_PID=$!
-sleep 2
+sleep 1
 kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true
 
-# 5. Install systemd unit.
-echo "Installing systemd unit"
-SERVICE_FILE="/etc/systemd/system/verstak-server.service"
-cp "$(dirname "$0")/../verstak-server.service" "$SERVICE_FILE"
-chmod 644 "$SERVICE_FILE"
+install -d -m 0750 "$ENV_DIR"
+printf 'VERSTAK_LISTEN=%s\n' "$LISTEN" > "$ENV_DIR/env"
+chmod 0640 "$ENV_DIR/env"
+cp "$(dirname "$0")/../verstak-server.service" /etc/systemd/system/verstak-server.service
+chmod 0644 /etc/systemd/system/verstak-server.service
 
-# Set port in environment file.
-mkdir -p /etc/verstak-server
-echo "VERSTAK_PORT=$PORT" > /etc/verstak-server/env
-
-# 6. Enable and start.
-echo "Enabling and starting service"
 systemctl daemon-reload
 systemctl enable verstak-server
-systemctl start verstak-server
+systemctl restart verstak-server
 
-echo ""
-echo "=== Installation complete ==="
-echo "Service: verstak-server"
-echo "Port:    $PORT"
-echo "Admin:   http://localhost:$PORT/admin/login"
-echo ""
-echo "Check status: systemctl status verstak-server"
-echo "View logs:    journalctl -u verstak-server -f"
+echo "Installed verstak-server listening on $LISTEN."
+echo "Admin: http://$LISTEN/admin/login"

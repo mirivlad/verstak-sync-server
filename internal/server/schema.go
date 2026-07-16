@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS server_devices (
     token_hash TEXT,
     token_prefix TEXT,
     token_suffix TEXT,
+    legacy_api_key INTEGER NOT NULL DEFAULT 0,
     user_id TEXT,
     vault_id TEXT,
     client_version TEXT,
@@ -76,11 +77,21 @@ CREATE TABLE IF NOT EXISTS server_idempotency_keys (
 );
 
 CREATE TABLE IF NOT EXISTS server_email_tokens (
-    token TEXT PRIMARY KEY,
+    token_hash TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     purpose TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS server_sessions (
+    token_hash TEXT PRIMARY KEY,
+    csrf_hash TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_seen TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS server_revisions (
@@ -93,6 +104,16 @@ CREATE TABLE IF NOT EXISTS server_blobs (
     sha256 TEXT PRIMARY KEY,
     size INTEGER NOT NULL,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS server_blob_refs (
+    user_id TEXT NOT NULL,
+    vault_id TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    last_accessed TEXT NOT NULL,
+    PRIMARY KEY (user_id, vault_id, sha256)
 );
 
 CREATE TABLE IF NOT EXISTS server_audit_log (
@@ -114,6 +135,10 @@ CREATE INDEX IF NOT EXISTS idx_server_users_username ON server_users(username);
 CREATE INDEX IF NOT EXISTS idx_server_users_email ON server_users(email);
 CREATE INDEX IF NOT EXISTS idx_server_audit_log_event ON server_audit_log(event_type);
 CREATE INDEX IF NOT EXISTS idx_server_audit_log_created ON server_audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_server_blob_refs_scope ON server_blob_refs(user_id, vault_id, sha256);
+CREATE INDEX IF NOT EXISTS idx_server_blob_refs_user ON server_blob_refs(user_id, sha256);
+CREATE INDEX IF NOT EXISTS idx_server_sessions_expiry ON server_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_server_sessions_subject ON server_sessions(scope, subject_id);
 
 CREATE TABLE IF NOT EXISTS server_smtp_config (
     key TEXT PRIMARY KEY,
@@ -124,6 +149,8 @@ CREATE TABLE IF NOT EXISTS server_smtp_config (
 type sqliteColumn struct {
 	primaryKeyOrder int
 }
+
+const schemaVersion = 2
 
 func migrateServerSchema(db *sql.DB) error {
 	tx, err := db.Begin()
@@ -150,6 +177,12 @@ func migrateServerSchema(db *sql.DB) error {
 	if err := backfillDeviceOwners(tx); err != nil {
 		return err
 	}
+	if err := migrateLegacyDeviceCredentials(tx); err != nil {
+		return err
+	}
+	if err := migrateEmailTokenHashes(tx); err != nil {
+		return err
+	}
 	if err := backfillOperationScope(tx); err != nil {
 		return err
 	}
@@ -167,8 +200,65 @@ func migrateServerSchema(db *sql.DB) error {
 		ON server_devices(user_id, vault_id)`); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+		return err
+	}
 
 	return tx.Commit()
+}
+
+func migrateLegacyDeviceCredentials(tx *sql.Tx) error {
+	if err := ensureSQLiteColumn(tx, "server_devices", "legacy_api_key", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// Existing rows predate the hash-only enrollment path. Their API keys keep
+	// working only when explicitly marked legacy; devices enrolled by this
+	// version store a disabled placeholder and can never authenticate with it.
+	_, err := tx.Exec(`UPDATE server_devices SET legacy_api_key=1
+		WHERE legacy_api_key=0 AND api_key NOT LIKE 'disabled:%'`)
+	return err
+}
+
+func migrateEmailTokenHashes(tx *sql.Tx) error {
+	columns, err := sqliteTableColumns(tx, "server_email_tokens")
+	if err != nil {
+		return err
+	}
+	if _, ok := columns["token_hash"]; ok {
+		return nil
+	}
+	if _, err := tx.Exec("ALTER TABLE server_email_tokens RENAME TO server_email_tokens_legacy"); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE TABLE server_email_tokens (
+		token_hash TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL,
+		purpose TEXT NOT NULL,
+		expires_at TEXT NOT NULL,
+		created_at TEXT NOT NULL
+	)`); err != nil {
+		return err
+	}
+	rows, err := tx.Query(`SELECT token, user_id, purpose, expires_at, created_at FROM server_email_tokens_legacy`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var token, userID, purpose, expiresAt, createdAt string
+		if err := rows.Scan(&token, &userID, &purpose, &expiresAt, &createdAt); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO server_email_tokens (token_hash, user_id, purpose, expires_at, created_at)
+			VALUES (?, ?, ?, ?, ?)`, sha256Hex(token), userID, purpose, expiresAt, createdAt); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = tx.Exec("DROP TABLE server_email_tokens_legacy")
+	return err
 }
 
 func ensureSQLiteColumn(tx *sql.Tx, table, column, definition string) error {

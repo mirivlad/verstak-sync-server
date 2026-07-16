@@ -3,7 +3,7 @@ package server
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
+	"html"
 	"log"
 	"net/http"
 	"strings"
@@ -13,8 +13,8 @@ import (
 )
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		jsonErr(w, 405, "POST required")
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 	var req struct {
@@ -22,12 +22,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, 400, "invalid JSON")
+	if !decodeJSONBody(w, r, &req, s.cfg.Limits.MaxJSONBody) {
 		return
 	}
 	if req.Username == "" || req.Email == "" || req.Password == "" {
 		jsonErr(w, 400, "username, email and password required")
+		return
+	}
+	if !s.allowRate(w, r, "register", req.Email) {
 		return
 	}
 	if err := validatePassword(req.Password); err != "" {
@@ -47,7 +49,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	id := make([]byte, 12)
 	rand.Read(id)
 	userID := hex.EncodeToString(id)
-	_, err = s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(
 		"INSERT INTO server_users (id, username, email, password_hash, confirmed, created_at) VALUES (?, ?, ?, ?, 0, ?)",
 		userID, req.Username, strings.ToLower(req.Email), string(hash), now,
 	)
@@ -59,29 +67,54 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		jsonInternalError(w, err)
 		return
 	}
-	tok := make([]byte, 24)
-	rand.Read(tok)
-	tokenStr := hex.EncodeToString(tok)
-	exp := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
-	s.db.Exec("INSERT INTO server_email_tokens (token, user_id, purpose, expires_at, created_at) VALUES (?, ?, 'confirm', ?, ?)",
-		tokenStr, userID, exp, now)
-	log.Printf("register: confirmation token=%s for user %s", tokenStr, req.Username)
+	if _, err := issueEmailToken(tx, userID, "confirm", 48*time.Hour); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
 	jsonOK(w, map[string]string{"status": "confirmation_sent"})
 }
 
 func (s *Server) handleConfirm(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
-		jsonErr(w, 405, "GET required")
+	if r.Method == http.MethodGet {
+		tokenStr := r.URL.Query().Get("token")
+		if tokenStr == "" {
+			jsonErrCode(w, http.StatusBadRequest, "invalid_request", "token required")
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<form method="POST"><input type="hidden" name="token" value="` + html.EscapeString(tokenStr) + `"><button>Confirm email</button></form>`))
 		return
 	}
-	tokenStr := r.URL.Query().Get("token")
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodGet, http.MethodPost)
+		return
+	}
+	tokenStr := ""
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		var req struct {
+			Token string `json:"token"`
+		}
+		if !decodeJSONBody(w, r, &req, s.cfg.Limits.MaxJSONBody) {
+			return
+		}
+		tokenStr = req.Token
+	} else if err := r.ParseForm(); err == nil {
+		tokenStr = r.FormValue("token")
+	} else {
+		jsonErrCode(w, http.StatusBadRequest, "invalid_request", "invalid form")
+		return
+	}
 	if tokenStr == "" {
 		jsonErr(w, 400, "token required")
 		return
 	}
 	var userID, expiresAt string
-	err := s.db.QueryRow("SELECT user_id, expires_at FROM server_email_tokens WHERE token=? AND purpose='confirm'",
-		tokenStr).Scan(&userID, &expiresAt)
+	err := s.db.QueryRow("SELECT user_id, expires_at FROM server_email_tokens WHERE token_hash=? AND purpose='confirm'",
+		emailTokenHash(tokenStr)).Scan(&userID, &expiresAt)
 	if err != nil {
 		jsonErr(w, 400, "invalid or expired token")
 		return
@@ -91,27 +124,45 @@ func (s *Server) handleConfirm(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 400, "token expired")
 		return
 	}
-	s.db.Exec("UPDATE server_users SET confirmed=1 WHERE id=?", userID)
+	tx, err := s.db.Begin()
+	if err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("UPDATE server_users SET confirmed=1 WHERE id=?", userID); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	if _, err := tx.Exec("DELETE FROM server_email_tokens WHERE token_hash=?", emailTokenHash(tokenStr)); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
 	log.Printf("confirm: user %s confirmed email", userID)
-	s.db.Exec("DELETE FROM server_email_tokens WHERE token=?", tokenStr)
 	jsonOK(w, map[string]string{"status": "confirmed"})
 }
 
 func (s *Server) handleUserLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		jsonErr(w, 405, "POST required")
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, 400, "invalid JSON")
+	if !decodeJSONBody(w, r, &req, s.cfg.Limits.MaxJSONBody) {
 		return
 	}
 	if req.Username == "" || req.Password == "" {
 		jsonErr(w, 400, "username and password required")
+		return
+	}
+	if !s.allowRate(w, r, "login", req.Username) {
 		return
 	}
 	var userID, hash string
@@ -134,25 +185,34 @@ func (s *Server) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 401, "invalid credentials")
 		return
 	}
-	s.db.Exec("UPDATE server_users SET last_seen=? WHERE id=?", time.Now().UTC().Format(time.RFC3339), userID)
-	tok := s.userTokens.Create(userID)
+	if _, err := s.db.Exec("UPDATE server_users SET last_seen=? WHERE id=?", time.Now().UTC().Format(time.RFC3339), userID); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	tok, _, err := s.createSession(sessionScopeUser, userID)
+	if err != nil {
+		jsonInternalError(w, err)
+		return
+	}
 	jsonOK(w, map[string]string{"token": tok, "user_id": userID})
 }
 
 func (s *Server) handleForgot(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		jsonErr(w, 405, "POST required")
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 	var req struct {
 		Email string `json:"email"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, 400, "invalid JSON")
+	if !decodeJSONBody(w, r, &req, s.cfg.Limits.MaxJSONBody) {
 		return
 	}
 	if req.Email == "" {
 		jsonErr(w, 400, "email required")
+		return
+	}
+	if !s.allowRate(w, r, "forgot", req.Email) {
 		return
 	}
 	var userID string
@@ -161,32 +221,30 @@ func (s *Server) handleForgot(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]string{"status": "if email exists, reset link sent"})
 		return
 	}
-	tok := make([]byte, 24)
-	rand.Read(tok)
-	tokenStr := hex.EncodeToString(tok)
-	exp := time.Now().Add(1 * time.Hour).UTC().Format(time.RFC3339)
-	now := time.Now().UTC().Format(time.RFC3339)
-	s.db.Exec("INSERT INTO server_email_tokens (token, user_id, purpose, expires_at, created_at) VALUES (?, ?, 'reset', ?, ?)",
-		tokenStr, userID, exp, now)
-	log.Printf("forgot: reset token=%s for user %s", tokenStr, userID)
+	if _, err := issueEmailToken(s.db, userID, "reset", time.Hour); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
 	jsonOK(w, map[string]string{"status": "if email exists, reset link sent"})
 }
 
 func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		jsonErr(w, 405, "POST required")
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 	var req struct {
 		Token       string `json:"token"`
 		NewPassword string `json:"new_password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonErr(w, 400, "invalid JSON")
+	if !decodeJSONBody(w, r, &req, s.cfg.Limits.MaxJSONBody) {
 		return
 	}
 	if req.Token == "" || req.NewPassword == "" {
 		jsonErr(w, 400, "token and new_password required")
+		return
+	}
+	if !s.allowRate(w, r, "reset", "") {
 		return
 	}
 	if err := validatePassword(req.NewPassword); err != "" {

@@ -2,6 +2,8 @@ package server
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/health", s.handleHealth)
+	s.mux.HandleFunc("/livez", s.handleLiveness)
+	s.mux.HandleFunc("/readyz", s.handleHealth)
 	s.mux.HandleFunc("/api/v1/device/register", s.handleDeviceRegister)
 	s.mux.HandleFunc("/api/v1/sync/push", s.handleSyncPush)
 	s.mux.HandleFunc("/api/v1/sync/pull", s.handleSyncPull)
@@ -23,6 +25,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/reset", s.handleUserWebReset)
 	s.mux.HandleFunc("/logout", s.handleUserWebLogout)
 	s.mux.HandleFunc("/api/v1/user/devices", s.handleUserDevices)
+	s.mux.HandleFunc("/api/v1/user/devices/", s.handleUserWebDeviceAction)
 	s.mux.HandleFunc("/admin/login", s.handleAdminLogin)
 	s.mux.HandleFunc("/admin/dashboard", s.handleAdminDashboard)
 	s.mux.HandleFunc("/admin/users", s.handleAdminUsers)

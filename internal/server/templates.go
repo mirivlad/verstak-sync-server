@@ -454,7 +454,7 @@ function testSMTP(){
 	)
 }
 
-func userDashboardHTML(locale, username, deviceRows string) string {
+func userDashboardHTML(locale, username, deviceRows, csrf string) string {
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="ru">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -479,7 +479,7 @@ a{color:#6366f1}
 </head><body>
 <div class="top">
 <h1>Verstak Sync</h1>
-<span>%[1]s · <a href="/logout">%[2]s</a></span>
+<span>%[1]s · <form action="/logout" method="POST" style="display:inline"><input type="hidden" name="csrf_token" value="%[14]s"><button type="submit" style="border:0;background:none;color:#6366f1;padding:0;cursor:pointer">%[2]s</button></form></span>
 </div>
 <h2>%[3]s</h2>
 <table><tr><th>%[4]s</th><th>%[5]s</th><th>%[6]s</th><th>%[7]s</th><th>%[8]s</th></tr>%[9]s</table>
@@ -494,7 +494,7 @@ function revokeDevice(id){
   if(!confirm('%[12]s'))return
   var pw=prompt('%[13]s')
   if(!pw)return
-  fetch('/api/client/revoke-device',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id:id,password:pw})}).then(function(r){return r.json()}).then(function(d){
+  fetch('/api/v1/user/devices/'+encodeURIComponent(id)+'/revoke',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':'%[14]s'},body:JSON.stringify({password:pw})}).then(function(r){return r.json()}).then(function(d){
     if(d.status==='revoked'){location.reload()}else{alert(d.error||'error')}
   })
 }
@@ -513,10 +513,11 @@ function revokeDevice(id){
 		t(locale, "userDashboard.connectNewHint"),
 		t(locale, "userDashboard.revokeConfirm"),
 		t(locale, "userDashboard.revokePrompt"),
+		html.EscapeString(csrf),
 	)
 }
 
-func adminCreateUserHTML(locale string) string {
+func adminCreateUserHTML(locale, csrf string) string {
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="ru">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -534,6 +535,7 @@ button:hover{background:#4f46e5}
 </style>
 </head><body>
 <form method="POST">
+<input type="hidden" name="csrf_token" value="%[8]s">
 <h1>%[2]s</h1>
 <label>%[3]s</label>
 <input type="text" name="username" autofocus required>
@@ -552,6 +554,7 @@ button:hover{background:#4f46e5}
 		t(locale, "server.password"),
 		t(locale, "admin.createUserBtn"),
 		t(locale, "server.dashboard"),
+		html.EscapeString(csrf),
 	)
 }
 

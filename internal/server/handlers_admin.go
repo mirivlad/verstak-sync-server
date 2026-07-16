@@ -35,15 +35,19 @@ button{background:#4ecca3;color:#1a1a2e;border:none;padding:0.5rem 1rem;border-r
 		}
 		user := r.FormValue("username")
 		pass := r.FormValue("password")
+		if !s.allowRate(w, r, "login", user) {
+			return
+		}
 		if !s.cfg.CheckAdmin(user, pass) {
 			http.Error(w, "401 Unauthorized", 401)
 			return
 		}
-		tok := s.tokens.Create()
-		http.SetCookie(w, &http.Cookie{
-			Name: "admin_session", Value: tok, Path: "/admin",
-			HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 86400,
-		})
+		tok, csrf, err := s.createSession(sessionScopeAdmin, user)
+		if err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+		s.setSessionCookies(w, r, sessionScopeAdmin, tok, csrf)
 		http.Redirect(w, r, "/admin/dashboard", http.StatusFound)
 	default:
 		http.Error(w, "method not allowed", 405)
@@ -51,6 +55,10 @@ button{background:#4ecca3;color:#1a1a2e;border:none;padding:0.5rem 1rem;border-r
 }
 
 func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
 	if !s.requireAdminCookie(w, r) {
 		return
 	}
@@ -77,6 +85,10 @@ a{color:#4ecca3}</style></head><body>
 }
 
 func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
 	if !s.requireAdminCookie(w, r) {
 		return
 	}
@@ -123,6 +135,10 @@ td{padding:0.5rem;border-bottom:1px solid #0f3460}a{color:#4ecca3}</style></head
 }
 
 func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
 	if !s.requireAdminCookie(w, r) {
 		return
 	}
@@ -159,16 +175,8 @@ td{padding:0.5rem;border-bottom:1px solid #0f3460}a{color:#4ecca3}</style></head
 }
 
 func (s *Server) requireAdminCookie(w http.ResponseWriter, r *http.Request) bool {
-	cookie, err := r.Cookie("admin_session")
-	if err != nil || cookie.Value == "" {
-		http.Redirect(w, r, "/admin/login", http.StatusFound)
-		return false
-	}
-	if !s.tokens.Check(cookie.Value) {
-		http.Redirect(w, r, "/admin/login", http.StatusFound)
-		return false
-	}
-	return true
+	_, ok := s.requireSession(w, r, sessionScopeAdmin)
+	return ok
 }
 
 func intToStr(n int) string {
@@ -177,20 +185,27 @@ func intToStr(n int) string {
 }
 
 func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
 	if !s.requireAdminCookie(w, r) {
 		return
 	}
-	var opsCount int
-	s.db.QueryRow("SELECT COUNT(*) FROM server_ops").Scan(&opsCount)
-	jsonOK(w, map[string]int{"ops": opsCount})
+	stats, err := s.Stats(r.Context())
+	if err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	jsonOK(w, stats)
 }
 
 func (s *Server) handleAdminSMTPTest(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdminCookie(w, r) {
+	if r.Method != "POST" {
+		methodNotAllowed(w, "POST")
 		return
 	}
-	if r.Method != "POST" {
-		jsonErr(w, 405, "POST required")
+	if !s.requireAdminMutation(w, r) {
 		return
 	}
 	var req struct {
@@ -229,6 +244,10 @@ func (s *Server) handleAdminSMTPTest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminAPIDevices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
 	if !s.requireAdminCookie(w, r) {
 		return
 	}
@@ -267,7 +286,7 @@ func (s *Server) handleAdminAPIKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case "GET":
-		rows, err := s.db.Query("SELECT id, name, api_key FROM server_devices ORDER BY created_at")
+		rows, err := s.db.Query("SELECT id, name, COALESCE(token_prefix,''), COALESCE(token_suffix,'') FROM server_devices ORDER BY created_at")
 		if err != nil {
 			jsonInternalError(w, err)
 			return
@@ -275,9 +294,12 @@ func (s *Server) handleAdminAPIKeys(w http.ResponseWriter, r *http.Request) {
 		defer rows.Close()
 		var out []map[string]string
 		for rows.Next() {
-			var id, name, key string
-			rows.Scan(&id, &name, &key)
-			out = append(out, map[string]string{"id": id, "name": name, "api_key": key})
+			var id, name, prefix, suffix string
+			if err := rows.Scan(&id, &name, &prefix, &suffix); err != nil {
+				jsonInternalError(w, err)
+				return
+			}
+			out = append(out, map[string]string{"id": id, "name": name, "token_hint": prefix + "…" + suffix})
 		}
 		jsonOK(w, out)
 	default:
@@ -286,11 +308,11 @@ func (s *Server) handleAdminAPIKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminAPISmtp(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdminCookie(w, r) {
+	if r.Method != "POST" {
+		methodNotAllowed(w, "POST")
 		return
 	}
-	if r.Method != "POST" {
-		jsonErr(w, 405, "POST required")
+	if !s.requireAdminMutation(w, r) {
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -307,24 +329,40 @@ func (s *Server) handleAdminAPISmtp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminAPIKeysDelete(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdminCookie(w, r) {
+	if r.Method != "DELETE" {
+		methodNotAllowed(w, "DELETE")
 		return
 	}
-	if r.Method != "DELETE" {
-		jsonErr(w, 405, "DELETE required")
+	if !s.requireAdminMutation(w, r) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/admin/api/keys/")
-	_, err := s.db.Exec("DELETE FROM server_devices WHERE id=?", id)
+	tx, err := s.db.Begin()
 	if err != nil {
 		jsonInternalError(w, err)
 		return
 	}
-	s.db.Exec("DELETE FROM server_user_devices WHERE device_id=?", id)
+	defer tx.Rollback()
+	if _, err := tx.Exec("DELETE FROM server_user_devices WHERE device_id=?", id); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	if _, err := tx.Exec("DELETE FROM server_devices WHERE id=?", id); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		jsonInternalError(w, err)
+		return
+	}
 	jsonOK(w, map[string]string{"status": "deleted"})
 }
 
 func (s *Server) handleAdminAPIUsers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
 	if !s.requireAdminCookie(w, r) {
 		return
 	}
@@ -410,7 +448,11 @@ func (s *Server) handleAdminAPIUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminAPIUserActions(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdminCookie(w, r) {
+	if r.Method != "POST" && r.Method != "DELETE" {
+		methodNotAllowed(w, "POST", "DELETE")
+		return
+	}
+	if !s.requireAdminMutation(w, r) {
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/admin/api/users/")
@@ -419,23 +461,52 @@ func (s *Server) handleAdminAPIUserActions(w http.ResponseWriter, r *http.Reques
 		id := strings.TrimSuffix(path, "/block")
 		id = strings.TrimSuffix(id, "/")
 		var blocked int
-		s.db.QueryRow("SELECT blocked FROM server_users WHERE id=?", id).Scan(&blocked)
+		if err := s.db.QueryRow("SELECT blocked FROM server_users WHERE id=?", id).Scan(&blocked); err != nil {
+			jsonErr(w, http.StatusNotFound, "user not found")
+			return
+		}
 		newVal := 1
 		if blocked != 0 {
 			newVal = 0
 		}
-		s.db.Exec("UPDATE server_users SET blocked=? WHERE id=?", newVal, id)
+		tx, err := s.db.Begin()
+		if err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+		defer tx.Rollback()
+		if _, err := tx.Exec("UPDATE server_users SET blocked=? WHERE id=?", newVal, id); err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+		if newVal != 0 {
+			if _, err := tx.Exec("DELETE FROM server_sessions WHERE scope='user' AND subject_id=?", id); err != nil {
+				jsonInternalError(w, err)
+				return
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			jsonInternalError(w, err)
+			return
+		}
 		jsonOK(w, map[string]interface{}{"status": "ok", "blocked": newVal})
 		return
 	}
 	if strings.HasSuffix(path, "/reset-password") && r.Method == "POST" {
+		if !s.allowRate(w, r, "admin-reset", "") {
+			return
+		}
 		id := strings.TrimSuffix(path, "/reset-password")
 		id = strings.TrimSuffix(id, "/")
 		b := make([]byte, 12)
 		rand.Read(b)
 		newPass := hex.EncodeToString(b)
-		hash, _ := bcrypt.GenerateFromPassword([]byte(newPass), bcrypt.DefaultCost)
-		_, err := s.db.Exec("UPDATE server_users SET password_hash=? WHERE id=?", string(hash), id)
+		hash, err := bcrypt.GenerateFromPassword([]byte(newPass), bcrypt.DefaultCost)
+		if err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+		_, err = s.db.Exec("UPDATE server_users SET password_hash=? WHERE id=?", string(hash), id)
 		if err != nil {
 			jsonInternalError(w, err)
 			return
@@ -450,8 +521,7 @@ func (s *Server) handleAdminAPIUserActions(w http.ResponseWriter, r *http.Reques
 			Username string `json:"username"`
 			Email    string `json:"email"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&editReq); err != nil {
-			jsonErr(w, 400, "bad json")
+		if !decodeJSONBody(w, r, &editReq, s.cfg.Limits.MaxJSONBody) {
 			return
 		}
 		if editReq.Username == "" || editReq.Email == "" {
@@ -468,20 +538,34 @@ func (s *Server) handleAdminAPIUserActions(w http.ResponseWriter, r *http.Reques
 	}
 	if r.Method == "DELETE" {
 		id := strings.TrimSuffix(path, "/")
-		rows, _ := s.db.Query("SELECT device_id FROM server_user_devices WHERE user_id=?", id)
-		var deviceIDs []string
-		for rows.Next() {
-			var did string
-			rows.Scan(&did)
-			deviceIDs = append(deviceIDs, did)
+		tx, err := s.db.Begin()
+		if err != nil {
+			jsonInternalError(w, err)
+			return
 		}
-		rows.Close()
-		for _, did := range deviceIDs {
-			s.db.Exec("DELETE FROM server_devices WHERE id=?", did)
+		defer tx.Rollback()
+		for _, statement := range []string{
+			"DELETE FROM server_sessions WHERE subject_id=? AND scope='user'",
+			"DELETE FROM server_email_tokens WHERE user_id=?",
+			"DELETE FROM server_blob_refs WHERE user_id=?",
+			"DELETE FROM server_idempotency_keys WHERE user_id=?",
+			"DELETE FROM server_tombstones WHERE user_id=?",
+			"DELETE FROM server_revisions WHERE op_id IN (SELECT op_id FROM server_ops WHERE user_id=?)",
+			"DELETE FROM server_ops WHERE user_id=?",
+			"DELETE FROM server_user_devices WHERE user_id=?",
+			"DELETE FROM server_devices WHERE user_id=?",
+			"DELETE FROM server_audit_log WHERE user_id=?",
+			"DELETE FROM server_users WHERE id=?",
+		} {
+			if _, err := tx.Exec(statement, id); err != nil {
+				jsonInternalError(w, err)
+				return
+			}
 		}
-		s.db.Exec("DELETE FROM server_user_devices WHERE user_id=?", id)
-		s.db.Exec("DELETE FROM server_email_tokens WHERE user_id=?", id)
-		s.db.Exec("DELETE FROM server_users WHERE id=?", id)
+		if err := tx.Commit(); err != nil {
+			jsonInternalError(w, err)
+			return
+		}
 		jsonOK(w, map[string]interface{}{"status": "deleted"})
 		return
 	}
@@ -496,8 +580,15 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(adminCreateUserHTML(locale)))
+		csrf := ""
+		if cookie, err := r.Cookie("csrf_token"); err == nil {
+			csrf = cookie.Value
+		}
+		w.Write([]byte(adminCreateUserHTML(locale, csrf)))
 	case "POST":
+		if !s.requireAdminMutation(w, r) {
+			return
+		}
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "bad form", 400)
 			return
@@ -551,11 +642,11 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminAPICreateUser(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdminCookie(w, r) {
+	if r.Method != "POST" {
+		methodNotAllowed(w, "POST")
 		return
 	}
-	if r.Method != "POST" {
-		jsonErr(w, 405, "POST required")
+	if !s.requireAdminMutation(w, r) {
 		return
 	}
 	var req struct {

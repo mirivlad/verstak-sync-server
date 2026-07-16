@@ -56,7 +56,7 @@ func (s *Server) authenticateDevice(w http.ResponseWriter, r *http.Request) (aut
 		Scan(&device.DeviceID, &userID, &vaultID, &revokedAt)
 	if err != nil {
 		err = s.db.QueryRow(`SELECT id, user_id, vault_id, revoked_at
-			FROM server_devices WHERE api_key=?`, key).
+			FROM server_devices WHERE api_key=? AND legacy_api_key=1`, key).
 			Scan(&device.DeviceID, &userID, &vaultID, &revokedAt)
 	}
 	if err != nil {
@@ -75,23 +75,25 @@ func (s *Server) authenticateDevice(w http.ResponseWriter, r *http.Request) (aut
 	}
 	if device.UserID != "" {
 		var blocked int
-		s.db.QueryRow("SELECT blocked FROM server_users WHERE id=?", device.UserID).Scan(&blocked)
+		if err := s.db.QueryRow("SELECT blocked FROM server_users WHERE id=?", device.UserID).Scan(&blocked); err != nil {
+			jsonInternalError(w, err)
+			return authenticatedDevice{}, false
+		}
 		if blocked != 0 {
 			jsonErr(w, 403, "user blocked")
 			return authenticatedDevice{}, false
 		}
 	}
-	s.db.Exec("UPDATE server_devices SET last_seen=? WHERE id=?", time.Now().UTC().Format(time.RFC3339), device.DeviceID)
+	if _, err := s.db.Exec("UPDATE server_devices SET last_seen=? WHERE id=?", time.Now().UTC().Format(time.RFC3339), device.DeviceID); err != nil {
+		jsonInternalError(w, err)
+		return authenticatedDevice{}, false
+	}
 	return device, true
 }
 
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
-	cookie, err := r.Cookie("session")
-	if err != nil || !s.tokens.Check(cookie.Value) {
-		http.Redirect(w, r, "/admin/login", http.StatusFound)
-		return false
-	}
-	return true
+	_, ok := s.requireSession(w, r, sessionScopeAdmin)
+	return ok
 }
 
 type PasswordError string

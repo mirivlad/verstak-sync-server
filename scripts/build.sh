@@ -22,7 +22,9 @@ mkdir -p "$OUTPUT_DIR"
 # Build
 echo "→ Building server binary..."
 cd "$REPO_ROOT"
-go build -o "$BINARY" ./cmd/server
+VERSION="${VERSION:-dev}"
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+go build -ldflags "-X github.com/verstak/verstak-sync-server/internal/server.Version=$VERSION -X github.com/verstak/verstak-sync-server/internal/server.BuildCommit=$COMMIT" -o "$BINARY" ./cmd/server
 echo "✅ Binary built: $BINARY"
 ls -lh "$BINARY"
 

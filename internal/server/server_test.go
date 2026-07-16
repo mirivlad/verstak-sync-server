@@ -111,7 +111,7 @@ func TestSyncPushPullStoresSequencedOps(t *testing.T) {
 	insertSyncUser(t, s, "user-a")
 	now := time.Now().UTC().Format(time.RFC3339)
 	if _, err := s.db.Exec(
-		"INSERT INTO server_devices (id, name, api_key, user_id, vault_id, last_seen, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO server_devices (id, name, api_key, legacy_api_key, user_id, vault_id, last_seen, created_at) VALUES (?, ?, ?, 1, ?, ?, ?, ?)",
 		"device-a", "Device A", "api-key", "user-a", "vault-a", now, now,
 	); err != nil {
 		t.Fatalf("insert device: %v", err)
@@ -185,7 +185,7 @@ func TestRevokedLegacyAPIKeyCannotPushOrPull(t *testing.T) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	if _, err := s.db.Exec(
-		"INSERT INTO server_devices (id, name, api_key, last_seen, revoked_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		"INSERT INTO server_devices (id, name, api_key, legacy_api_key, last_seen, revoked_at, created_at) VALUES (?, ?, ?, 1, ?, ?, ?)",
 		"device-revoked", "Revoked Device", "revoked-key", now, now, now,
 	); err != nil {
 		t.Fatalf("insert device: %v", err)
@@ -389,8 +389,8 @@ func TestWebResetRejectsExpiredToken(t *testing.T) {
 	insertPairableUser(t, s, "user-a", "alice", oldPassword)
 	now := time.Now().UTC().Format(time.RFC3339)
 	if _, err := s.db.Exec(`INSERT INTO server_email_tokens
-		(token, user_id, purpose, expires_at, created_at)
-		VALUES (?, ?, 'reset', ?, ?)`, "expired-reset-token", "user-a", time.Now().Add(-time.Hour).UTC().Format(time.RFC3339), now); err != nil {
+		(token_hash, user_id, purpose, expires_at, created_at)
+		VALUES (?, ?, 'reset', ?, ?)`, emailTokenHash("expired-reset-token"), "user-a", time.Now().Add(-time.Hour).UTC().Format(time.RFC3339), now); err != nil {
 		t.Fatalf("insert reset token: %v", err)
 	}
 
@@ -438,18 +438,18 @@ func TestServerRenderedPagesEscapeStoredValues(t *testing.T) {
 		{
 			name:          "user dashboard",
 			path:          "/dashboard",
-			cookie:        &http.Cookie{Name: "user_session", Value: s.userTokens.Create("user-a")},
+			cookie:        testSessionCookie(t, s, sessionScopeUser, "user-a"),
 			containsDevID: true,
 		},
 		{
 			name:   "admin users",
 			path:   "/admin/users",
-			cookie: &http.Cookie{Name: "admin_session", Value: s.tokens.Create()},
+			cookie: testSessionCookie(t, s, sessionScopeAdmin, "admin"),
 		},
 		{
 			name:          "admin devices",
 			path:          "/admin/devices",
-			cookie:        &http.Cookie{Name: "admin_session", Value: s.tokens.Create()},
+			cookie:        testSessionCookie(t, s, sessionScopeAdmin, "admin"),
 			containsDevID: true,
 		},
 	}
@@ -474,6 +474,19 @@ func TestServerRenderedPagesEscapeStoredValues(t *testing.T) {
 			}
 		})
 	}
+}
+
+func testSessionCookie(t *testing.T, s *Server, scope, subjectID string) *http.Cookie {
+	t.Helper()
+	token, _, err := s.createSession(scope, subjectID)
+	if err != nil {
+		t.Fatalf("create test session: %v", err)
+	}
+	name := "user_session"
+	if scope == sessionScopeAdmin {
+		name = "admin_session"
+	}
+	return &http.Cookie{Name: name, Value: token}
 }
 
 func TestNewServerMigratesLegacyOperationScope(t *testing.T) {

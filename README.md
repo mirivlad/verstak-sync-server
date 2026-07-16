@@ -8,7 +8,7 @@ This server provides synchronization between devices running Verstak2. It handle
 
 - Device registration and authentication
 - Vault-scoped, ordered operation-log relay with server sequence numbers
-- Optional blob endpoints, not used by the current bounded Desktop file sync
+- Scoped content-addressed Blob transport for binary and large file content
 - User management with email confirmation
 
 ## Quick Start
@@ -18,10 +18,12 @@ This server provides synchronization between devices running Verstak2. It handle
 ./scripts/build.sh
 
 # Run
-./build/bin/verstak-sync-server --port 47732 --data ./server-data
+./build/bin/verstak-sync-server --data ./server-data
 
 # First run with admin user
-./build/bin/verstak-sync-server --admin-user admin --admin-pass secret
+printf '%s\n' 'choose-a-long-password' > /tmp/verstak-admin-password
+chmod 600 /tmp/verstak-admin-password
+./build/bin/verstak-sync-server --admin-user admin --admin-pass-file /tmp/verstak-admin-password
 ```
 
 ## Release packages
@@ -51,16 +53,43 @@ annotated tag when necessary, then creates or updates the GitHub Release.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--port` | 47732 | HTTP port |
+| `--listen` | `127.0.0.1:47732` | HTTP address; an administrator must explicitly expose another interface |
+| `--port` | — | Deprecated compatibility shortcut; always binds loopback |
 | `--data` | ./server-data | Data directory |
 | `--admin-user` | | Create admin user (first run) |
-| `--admin-pass` | | Admin password (first run) |
+| `--admin-pass-file` | | Read the initial admin password from a protected file |
+| `--admin-pass-stdin` | | Read the initial admin password from stdin |
+
+The server has explicit header/read/write/idle timeouts and a 16 KiB header
+limit. It handles SIGINT/SIGTERM with a 20-second graceful shutdown and closes
+SQLite afterwards. Release builds publish `version` and `build_commit` through
+the health response; neither logs nor health contain credentials.
+
+`config.yml` can set `listen`, `public_url`, `trusted_proxies`, and limits:
+
+```yaml
+listen: 127.0.0.1:47732
+public_url: https://sync.example.test
+trusted_proxies: [127.0.0.1, ::1]
+limits:
+  max_json_body: 2097152
+  max_push_operations: 100
+  max_payload_json: 262144
+  max_pull_page: 100
+  max_blob_bytes: 268435456
+  max_vault_blob_bytes: 4294967296
+  max_user_blob_bytes: 8589934592
+retention:
+  idempotency_hours: 24
+  audit_days: 90
+  temp_upload_hours: 24
+```
 
 Production installs use:
 
 - binary: `/opt/verstak-sync-server/verstak-sync-server`;
 - data directory: `/var/lib/verstak-sync-server`;
-- port environment file: `/etc/verstak-server/env`;
+- listen-address environment file: `/etc/verstak-server/env`;
 - service: `verstak-server`.
 
 Install from a built binary:
@@ -69,9 +98,9 @@ Install from a built binary:
 ./scripts/build.sh
 sudo ./scripts/install.sh \
   --bin ./build/bin/verstak-sync-server \
-  --port 47732 \
+  --listen 127.0.0.1:47732 \
   --admin-user admin \
-  --admin-pass 'change-this-password'
+  --admin-pass-file /root/verstak-admin-password
 ```
 
 The install script creates a locked-down system user, initializes the data
@@ -95,7 +124,7 @@ curl http://127.0.0.1:47732/api/v1/health
 Change the listen port:
 
 ```bash
-echo 'VERSTAK_PORT=47733' | sudo tee /etc/verstak-server/env
+echo 'VERSTAK_LISTEN=127.0.0.1:47733' | sudo tee /etc/verstak-server/env
 sudo systemctl restart verstak-server
 ```
 
@@ -139,7 +168,7 @@ sudo tar --xattrs --acls -xzf verstak-sync-backup-YYYYMMDD-HHMMSS.tar.gz -C /var
 sudo chown -R verstak:verstak /var/lib/verstak-sync-server
 sudo chmod 750 /var/lib/verstak-sync-server
 sudo systemctl start verstak-server
-curl http://127.0.0.1:${VERSTAK_PORT:-47732}/api/v1/health
+curl http://127.0.0.1:47732/api/v1/health
 ```
 
 After restore, connected desktop clients keep their existing device tokens.
@@ -176,7 +205,7 @@ Desktop sync client:
 User API:
 
 - `POST /api/v1/auth/register` - Register a user
-- `GET /api/v1/auth/confirm?token=...` - Confirm email
+- `GET /api/v1/auth/confirm?token=...` - Display a confirmation form; `POST` performs confirmation
 - `POST /api/v1/auth/login` - User login
 - `POST /api/v1/auth/forgot` - Request password reset
 - `POST /api/v1/auth/reset` - Reset password
@@ -200,11 +229,67 @@ does not merge files, resolve conflicts, or create replacement names.
 The desktop pairing payload may supply an existing `vault_id` to add a new
 empty local vault to that remote scope. The server treats that value only as a
 scope selector: reconciliation, conflict detection, snapshots, and durable
-workspace identity remain Desktop-core responsibilities. Current Desktop core
-uses bounded inline file payloads (text or base64 up to 8 MB) and workspace
-operations (`create`, `rename`, `trash`, `restore`). Blob transport, quotas,
-pull pagination, and operation retention are a later milestone; the existing
-blob endpoints must not be interpreted as enabled Desktop large-file sync.
+workspace identity remain Desktop-core responsibilities. Small text can remain
+inline; binary and large files are uploaded first and their operations carry a
+`blob` `{sha256,size}` reference. Blob bytes are physically deduplicated but a
+`user_id`/`vault_id` reference is mandatory. Knowing another scope's SHA-256
+never grants download access. Revoked devices and blocked users lose sync and
+blob access immediately.
+
+`POST /api/v1/sync/pull` accepts `since_sequence` and optional `page_limit`.
+The response has ordered `ops`, `page_last_sequence`, `server_sequence`, and
+`has_more`. Clients must persist a cursor only after applying each operation.
+Push is capped by the configured JSON/body/field limits and returns stable
+JSON `{error,code}` errors (including `request_too_large`, `rate_limited`, and
+`quota_exceeded`); desktop and UI localize codes rather than server text.
+
+New device tokens, sessions, and email/reset tokens are stored only as SHA-256
+hashes. The plaintext device token is returned once by pairing. Older plaintext
+API keys are marked `legacy_api_key=1` during migration and are never created
+again; rotate/re-pair them during normal deployment. Admin key endpoints show
+only a prefix/suffix hint. Sessions are database-backed, expire after 24 hours,
+rotate on login, and use HttpOnly/Lax cookies plus a SameSite/CSRF companion
+cookie. Mutating browser endpoints require a matching CSRF token and do not use
+GET for destructive work.
+
+### Reverse proxy and TLS
+
+TLS terminates at nginx or Caddy; the server has no built-in TLS. It ignores
+`Forwarded`, `X-Forwarded-For`, and `X-Forwarded-Proto` unless the TCP peer is
+listed in `trusted_proxies`. For a local nginx/Caddy proxy use
+`trusted_proxies: [127.0.0.1, ::1]` and set `public_url` to the HTTPS URL.
+
+```nginx
+location / {
+  proxy_pass http://127.0.0.1:47732;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Never bind `0.0.0.0` merely to make a proxy work. If an external listener is
+intentional, restrict it with a firewall and configure the real proxy CIDR.
+
+### Operations, retention, and privacy
+
+`GET /api/v1/health`, `/livez`, and `/readyz` report status, version, build,
+uptime, database reachability, blob writability, schema version, and server
+time without paths or secrets. The internal stats service exposes user/device,
+vault, operation, database/blob size, and last-sync counters for a future
+admin panel.
+
+Retention cleans expired sessions/email tokens, bounded idempotency records,
+old audit entries, stale upload temp files, and in-memory rate buckets. It does
+**not** delete sync operations or referenced blobs: without a materialized
+checkpoint and verified recovery protocol, pruning would prevent a new device
+from restoring a vault. That checkpoint/operation-retention design is a future
+milestone.
+
+The server is optional: Desktop remains local-first. The relay can see metadata
+and file bytes needed to serve operations/blobs; files are not end-to-end
+encrypted in this milestone. Secrets, plugin settings, Todo, Journal,
+Activity, and Browser Inbox are not synchronized here.
 
 New device enrollment requires a non-empty `vault_id`. The `legacy:` prefix is
 reserved for server-side migration of older records and cannot be selected by

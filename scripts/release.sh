@@ -15,9 +15,9 @@ if [[ "$(go env GOOS)" != "linux" || "$(go env GOARCH)" != "amd64" ]]; then
 fi
 
 echo "=== verstak sync server release $VERSION ==="
-"$ROOT/scripts/build.sh"
+VERSION="$VERSION" "$ROOT/scripts/build.sh"
 
-RELEASE_ROOT="$ROOT/release"
+RELEASE_ROOT="${RELEASE_ROOT:-$ROOT/release}"
 STAGING="$RELEASE_ROOT/verstak-sync-server-$VERSION-linux-amd64"
 ARCHIVE="$RELEASE_ROOT/verstak-sync-server-linux-amd64-$VERSION.tar.gz"
 rm -rf "$STAGING" "$ARCHIVE"

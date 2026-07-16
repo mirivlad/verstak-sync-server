@@ -1,121 +1,33 @@
 package server
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
-type pairRateLimit struct {
-	mu       sync.Mutex
-	attempts map[string]int
-}
-
-func (p *pairRateLimit) allow(ip string) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.attempts == nil {
-		p.attempts = make(map[string]int)
-	}
-	p.attempts[ip]++
-	return p.attempts[ip] <= 5
-}
-
-func (p *pairRateLimit) reset(ip string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	delete(p.attempts, ip)
-}
-
-type tokenStore struct {
-	mu     sync.Mutex
-	tokens map[string]time.Time
-}
-
-func newTokenStore() *tokenStore {
-	return &tokenStore{tokens: make(map[string]time.Time)}
-}
-
-func (ts *tokenStore) Create() string {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	b := make([]byte, 16)
-	rand.Read(b)
-	tok := hex.EncodeToString(b)
-	ts.tokens[tok] = time.Now().Add(24 * time.Hour)
-	return tok
-}
-
-func (ts *tokenStore) Check(tok string) bool {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	exp, ok := ts.tokens[tok]
-	if !ok {
-		return false
-	}
-	if time.Now().After(exp) {
-		delete(ts.tokens, tok)
-		return false
-	}
-	return true
-}
-
-type userTokenStore struct {
-	mu     sync.Mutex
-	tokens map[string]userTokenEntry
-}
-
-type userTokenEntry struct {
-	UserID    string
-	ExpiresAt time.Time
-}
-
-func newUserTokenStore() *userTokenStore {
-	return &userTokenStore{tokens: make(map[string]userTokenEntry)}
-}
-
-func (uts *userTokenStore) Create(userID string) string {
-	uts.mu.Lock()
-	defer uts.mu.Unlock()
-	b := make([]byte, 16)
-	rand.Read(b)
-	tok := hex.EncodeToString(b)
-	uts.tokens[tok] = userTokenEntry{UserID: userID, ExpiresAt: time.Now().Add(24 * time.Hour)}
-	return tok
-}
-
-func (uts *userTokenStore) Check(tok string) (string, bool) {
-	uts.mu.Lock()
-	defer uts.mu.Unlock()
-	entry, ok := uts.tokens[tok]
-	if !ok {
-		return "", false
-	}
-	if time.Now().After(entry.ExpiresAt) {
-		delete(uts.tokens, tok)
-		return "", false
-	}
-	return entry.UserID, true
-}
-
 type Server struct {
-	db         *sql.DB
-	cfg        *Config
-	tokens     *tokenStore
-	userTokens *userTokenStore
-	blobsDir   string
-	mux        *http.ServeMux
-	pairLimit  *pairRateLimit
+	db        *sql.DB
+	dbPath    string
+	cfg       *Config
+	blobsDir  string
+	mux       *http.ServeMux
+	limiter   *rateLimiter
+	startedAt time.Time
 }
+
+// Version and BuildCommit are assigned through -ldflags during release builds.
+var (
+	Version     = "dev"
+	BuildCommit = "unknown"
+)
 
 func (s *Server) auditLog(eventType, userID, deviceID, ip, msg string) {
 	s.db.Exec("INSERT INTO server_audit_log (event_type, user_id, device_id, ip, message, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -123,11 +35,28 @@ func (s *Server) auditLog(eventType, userID, deviceID, ip, msg string) {
 }
 
 func NewServer(dbPath, dataDir string, cfg *Config) (*Server, error) {
+	if cfg == nil {
+		cfg = DefaultConfig()
+	}
+	if err := cfg.normalize(); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
 	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?mode=rwc", dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	db.SetMaxOpenConns(1)
+	for _, pragma := range []string{
+		"PRAGMA foreign_keys = ON",
+		"PRAGMA busy_timeout = 5000",
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA synchronous = NORMAL",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("sqlite %s: %w", pragma, err)
+		}
+	}
 
 	for _, stmt := range strings.Split(serverSchema, ";") {
 		stmt = strings.TrimSpace(stmt)
@@ -151,12 +80,12 @@ func NewServer(dbPath, dataDir string, cfg *Config) (*Server, error) {
 	}
 
 	s := &Server{
-		db:         db,
-		cfg:        cfg,
-		tokens:     newTokenStore(),
-		userTokens: newUserTokenStore(),
-		blobsDir:   blobsDir,
-		pairLimit:  &pairRateLimit{},
+		db:        db,
+		dbPath:    dbPath,
+		cfg:       cfg,
+		blobsDir:  blobsDir,
+		limiter:   newRateLimiter(nil),
+		startedAt: time.Now().UTC(),
 	}
 	s.mux = http.NewServeMux()
 	return s, nil
@@ -174,6 +103,36 @@ func (s *Server) Close() error {
 	return s.db.Close()
 }
 
+// Handler is the only HTTP entrypoint. Additional request security middleware
+// is composed here so tests and production use the same path.
+func (s *Server) Handler() http.Handler {
+	return s.mux
+}
+
+// HTTPServer creates a conservatively configured server suitable for running
+// behind nginx or Caddy. It intentionally does not enable TLS itself.
+func (s *Server) HTTPServer(addr string) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
+}
+
+// ListenAndServe exists for callers that do not need to manage lifecycle. The
+// command entrypoint uses HTTPServer plus graceful shutdown instead.
 func (s *Server) ListenAndServe(addr string) error {
-	return http.ListenAndServe(addr, s.mux)
+	return s.HTTPServer(addr).ListenAndServe()
+}
+
+func (s *Server) clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	return s.clientIPFromPeer(host, r.Header.Get("X-Forwarded-For"))
 }

@@ -22,7 +22,7 @@ func (s *Server) resetPasswordWithToken(token, newPassword string) (string, erro
 
 	var userID, expiresAt string
 	err = tx.QueryRow(`SELECT user_id, expires_at FROM server_email_tokens
-		WHERE token=? AND purpose='reset'`, token).Scan(&userID, &expiresAt)
+		WHERE token_hash=? AND purpose='reset'`, emailTokenHash(token)).Scan(&userID, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", errResetTokenInvalid
 	}
@@ -35,7 +35,7 @@ func (s *Server) resetPasswordWithToken(token, newPassword string) (string, erro
 	}
 
 	deleted, err := tx.Exec(`DELETE FROM server_email_tokens
-		WHERE token=? AND purpose='reset' AND expires_at=?`, token, expiresAt)
+		WHERE token_hash=? AND purpose='reset' AND expires_at=?`, emailTokenHash(token), expiresAt)
 	if err != nil {
 		return "", err
 	}
@@ -61,6 +61,9 @@ func (s *Server) resetPasswordWithToken(token, newPassword string) (string, erro
 	}
 	if updatedCount != 1 {
 		return "", errResetTokenInvalid
+	}
+	if _, err := tx.Exec("DELETE FROM server_email_tokens WHERE user_id=? AND purpose='reset'", userID); err != nil {
+		return "", err
 	}
 	if err := tx.Commit(); err != nil {
 		return "", err
