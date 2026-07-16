@@ -20,6 +20,7 @@ type webRenderer struct {
 type webPage struct {
 	Locale            string
 	LocalePreference  string
+	DefaultLocale     string
 	Title             string
 	ServerName        string
 	CurrentPath       string
@@ -111,7 +112,7 @@ func newWebRenderer() (*webRenderer, error) {
 		return nil, err
 	}
 	renderer := &webRenderer{templates: make(map[string]*template.Template)}
-	for _, page := range []string{"home", "login", "register", "forgot", "reset", "confirm", "message", "error", "admin_login", "dashboard", "admin", "admin_create_user", "vault_detail"} {
+	for _, page := range []string{"home", "login", "register", "forgot", "reset", "confirm", "message", "error", "admin_login", "dashboard", "admin", "admin_create_user", "vault_detail", "admin_settings"} {
 		clone, err := layout.Clone()
 		if err != nil {
 			return nil, err
@@ -139,6 +140,7 @@ func (s *Server) renderPageStatus(w http.ResponseWriter, r *http.Request, page s
 	}
 	data.Locale = s.webLocale(r)
 	data.LocalePreference = s.webLocalePreference(r)
+	data.DefaultLocale = s.cfg.Web.DefaultLocale
 	data.ServerName = s.cfg.Web.ServerName
 	data.CurrentPath = r.URL.Path
 	data.CurrentURL = r.URL.RequestURI()

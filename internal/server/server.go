@@ -39,6 +39,9 @@ func NewServer(dbPath, dataDir string, cfg *Config) (*Server, error) {
 	if cfg == nil {
 		cfg = DefaultConfig()
 	}
+	if cfg.path == "" {
+		cfg.path = filepath.Join(dataDir, "config.yml")
+	}
 	if err := cfg.normalize(); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}

@@ -141,6 +141,10 @@ func (s *Server) handleAdminWeb(w http.ResponseWriter, r *http.Request) {
 		s.renderWebError(w, r, http.StatusInternalServerError, "error.internal", "/admin/dashboard")
 		return
 	}
+	if page == "settings" {
+		s.renderPage(w, r, "admin_settings", data)
+		return
+	}
 	s.renderPage(w, r, "admin", data)
 }
 
@@ -330,6 +334,27 @@ func (s *Server) handleAdminWebAction(w http.ResponseWriter, r *http.Request) {
 	}
 	action := r.FormValue("action")
 	switch action {
+	case "web-settings":
+		if !s.adminReauth(r, session.SubjectID) {
+			s.renderWebError(w, r, http.StatusForbidden, "error.invalidCredentials", "/admin/settings")
+			return
+		}
+		locale := r.FormValue("default_locale")
+		if locale != "ru" && locale != "en" {
+			locale = "en"
+		}
+		s.cfg.mu.Lock()
+		s.cfg.Web.DefaultLocale = locale
+		s.cfg.Web.AllowRegistration = r.FormValue("allow_registration") == "on"
+		s.cfg.Web.ServerName = strings.TrimSpace(r.FormValue("server_name"))
+		err := s.cfg.saveLocked()
+		s.cfg.mu.Unlock()
+		if err != nil {
+			jsonInternalError(w, err)
+			return
+		}
+		s.auditLog("web_settings_updated", "", "", s.clientIP(r), "updated by administrator")
+		http.Redirect(w, r, "/admin/settings", http.StatusSeeOther)
 	case "toggle-user":
 		if !s.adminReauth(r, session.SubjectID) {
 			s.renderWebError(w, r, http.StatusForbidden, "error.invalidCredentials", "/admin/users")
