@@ -141,6 +141,19 @@ func TestConfirmationPageUsesSharedTemplateAndEscapesToken(t *testing.T) {
 	}
 }
 
+func TestNewServerSetsConfigPathInsideDataDirectory(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	s, err := NewServer(dir+"/server.db", dir+"/data", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if !strings.HasPrefix(cfg.path, dir+"/data/") {
+		t.Fatalf("config path escaped data directory: %q", cfg.path)
+	}
+}
+
 func TestWebSessionScopesDoNotCrossAuthorizePages(t *testing.T) {
 	s, err := newTestServer(t)
 	if err != nil {
