@@ -11,16 +11,49 @@
 - Плагины явно указывают, какие данные можно синхронизировать.
 - Sync — не источник правды, а дополнение.
 
-## API
+## API (текущий)
+
+Desktop sync client:
 
 ```
-POST   /api/v1/pair          — создание пары устройство-сервер
-POST   /api/v1/auth           — аутентификация
-GET    /api/v1/devices         — список устройств
-POST   /api/v1/sync           — синхронизация операций
-GET    /api/v1/blob/:hash     — скачать blob
-PUT    /api/v1/blob/:hash     — загрузить blob
-GET    /api/v1/operations     — получить операции с последнего sync point
+POST   /api/client/pair              — pair device with username/password
+POST   /api/auth/test                — validate username/password
+GET    /api/client/me                 — current authenticated device details
+POST   /api/client/revoke-current     — revoke current device token
+POST   /api/client/revoke-device      — revoke another device
+POST   /api/v1/sync/push              — push local operations
+POST   /api/v1/sync/pull              — pull operations since server sequence
+POST   /api/v1/blobs/                 — store a blob, return SHA-256
+GET    /api/v1/blobs/{sha256}         — download a stored blob
+```
+
+User API:
+
+```
+POST   /api/v1/auth/register          — register a user
+GET    /api/v1/auth/confirm           — confirm email (GET shows form, POST confirms)
+POST   /api/v1/auth/login             — user login
+POST   /api/v1/auth/forgot            — request password reset
+POST   /api/v1/auth/reset             — reset password
+GET    /api/v1/user/devices           — list user devices
+```
+
+Operational:
+
+```
+GET    /api/v1/health                 — server health and storage status
+GET    /livez                         — liveness probe
+GET    /readyz                        — readiness probe
+```
+
+Embedded web console:
+
+```
+GET    /                              — public page
+GET    /login, /register, /forgot, /reset, /logout
+GET    /dashboard                     — user device management
+GET    /admin/login                   — admin console
+GET    /admin/...                     — admin sections (users, devices, vaults, storage, audit, SMTP, diagnostics)
 ```
 
 ## Структура
@@ -31,14 +64,20 @@ verstak-sync-server/
   cmd/
     server/
   internal/
-    api/
-    auth/
-    device/
-    vault/
-    blob/
-    conflict/
-  migrations/
-    ...
+    server/
+      server.go
+      routes.go
+      handlers_api.go
+      handlers_auth.go
+      handlers_admin.go
+      schema.go
+    web/
+      ...
   go.mod
   README.md
 ```
+
+## Подробнее
+
+См. [README.md](README.md) для полной документации по развёртыванию,
+конфигурации, backup/restore и архитектуре.

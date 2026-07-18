@@ -1,3 +1,17 @@
+<div align="center">
+
+# Verstak Sync Server
+
+### Optional self-hosted synchronization relay for Verstak vaults.
+
+**English** · [Русский](README.ru.md)
+
+[![Release](https://img.shields.io/github/v/release/mirivlad/verstak-sync-server?include_prereleases\&label=release)](https://github.com/mirivlad/verstak-sync-server/releases)
+![Status](https://img.shields.io/badge/status-alpha-orange)
+[![License](https://img.shields.io/github/license/mirivlad/verstak-sync-server)](LICENSE)
+
+</div>
+
 # Verstak Sync Server
 
 Standalone sync server for Verstak2 platform.
