@@ -104,6 +104,13 @@ func (s *Server) smtpSend(to, subject, body string) error {
 		log.Printf("smtp: %v (to=%s)", err, to)
 		return err
 	}
+	var ok bool
+	if from, ok = normalizeEmailAddress(from); !ok {
+		return fmt.Errorf("invalid SMTP sender address")
+	}
+	if to, ok = normalizeEmailAddress(to); !ok {
+		return fmt.Errorf("invalid SMTP recipient address")
+	}
 	log.Printf("smtp: sending to %s via %s:%s (security=%s)", to, host, port, security)
 	msg := []byte("From: " + from + "\r\n" +
 		"To: " + to + "\r\n" +
@@ -128,6 +135,13 @@ func (s *Server) smtpSend(to, subject, body string) error {
 func (s *Server) smtpTest(host, port, user, pass, security, from, to string) error {
 	if host == "" || port == "" || from == "" {
 		return fmt.Errorf("SMTP not configured")
+	}
+	var ok bool
+	if from, ok = normalizeEmailAddress(from); !ok {
+		return fmt.Errorf("invalid SMTP sender address")
+	}
+	if to, ok = normalizeEmailAddress(to); !ok {
+		return fmt.Errorf("invalid SMTP recipient address")
 	}
 	msg := []byte("From: " + from + "\r\nTo: " + to + "\r\nSubject: Test from Verstak Sync\r\n\r\nThis is a test email from Verstak Sync Server.\r\n")
 	cl, err := s.smtpConnect(host, port, user, pass, security)

@@ -158,6 +158,12 @@ func (s *Server) handleAdminCreateUserWeb(w http.ResponseWriter, r *http.Request
 			s.renderPage(w, r, "admin_create_user", webPage{Title: "admin.createUser", Admin: true, Flash: "error.allFieldsRequired"})
 			return
 		}
+		normalizedEmail, ok := normalizeEmailAddress(email)
+		if !ok {
+			s.renderPage(w, r, "admin_create_user", webPage{Title: "admin.createUser", Admin: true, Flash: "error.invalidEmail"})
+			return
+		}
+		email = normalizedEmail
 		if err := validatePassword(password); err != "" {
 			s.renderPage(w, r, "admin_create_user", webPage{Title: "admin.createUser", Admin: true, Flash: "error.passwordInvalid"})
 			return
@@ -587,6 +593,12 @@ func (s *Server) handleAdminWebAction(w http.ResponseWriter, r *http.Request) {
 			s.renderWebError(w, r, http.StatusBadRequest, "error.allFieldsRequired", "/admin/users")
 			return
 		}
+		normalizedEmail, ok := normalizeEmailAddress(email)
+		if !ok {
+			s.renderWebError(w, r, http.StatusBadRequest, "error.invalidEmail", "/admin/users")
+			return
+		}
+		email = normalizedEmail
 		if _, err := s.db.Exec("UPDATE server_users SET username=?, email=? WHERE id=?", username, email, id); err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				s.renderWebError(w, r, http.StatusConflict, "error.accountTaken", "/admin/users")

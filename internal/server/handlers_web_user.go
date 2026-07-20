@@ -45,6 +45,12 @@ func (s *Server) handleUserWebRegister(w http.ResponseWriter, r *http.Request) {
 			s.renderPage(w, r, "register", webPage{Title: "auth.registerTitle", Flash: "error.allFieldsRequired"})
 			return
 		}
+		normalizedEmail, ok := normalizeEmailAddress(email)
+		if !ok {
+			s.renderPage(w, r, "register", webPage{Title: "auth.registerTitle", Flash: "error.invalidEmail"})
+			return
+		}
+		email = normalizedEmail
 		if !s.allowWebRate(w, r, "register", email, "/register") {
 			return
 		}
@@ -65,7 +71,7 @@ func (s *Server) handleUserWebRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		userID := hex.EncodeToString(id)
 		now := time.Now().UTC().Format(time.RFC3339)
-		if _, err := s.db.Exec("INSERT INTO server_users (id, username, email, password_hash, confirmed, created_at) VALUES (?, ?, ?, ?, 0, ?)", userID, username, strings.ToLower(email), string(hash), now); err != nil {
+		if _, err := s.db.Exec("INSERT INTO server_users (id, username, email, password_hash, confirmed, created_at) VALUES (?, ?, ?, ?, 0, ?)", userID, username, email, string(hash), now); err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				s.renderPage(w, r, "register", webPage{Title: "auth.registerTitle", Flash: "error.accountTaken"})
 				return

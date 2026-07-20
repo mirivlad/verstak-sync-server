@@ -5,12 +5,30 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d /tmp/verstak-sync-web.XXXXXX)"
 PORT="47794"
 DEBUG_PORT="9223"
-cleanup() { kill "${BROWSER_PID:-}" 2>/dev/null || true; kill "${SERVER_PID:-}" 2>/dev/null || true; wait "${BROWSER_PID:-}" 2>/dev/null || true; wait "${SERVER_PID:-}" 2>/dev/null || true; if [[ "${KEEP_SMOKE_ARTIFACTS:-}" == "1" ]]; then printf 'web smoke artefacts retained at %s\n' "$TMP"; else rm -rf "$TMP"; fi; }
+cleanup() {
+  kill "${BROWSER_PID:-}" 2>/dev/null || true
+  kill "${SERVER_PID:-}" 2>/dev/null || true
+  wait "${BROWSER_PID:-}" 2>/dev/null || true
+  wait "${SERVER_PID:-}" 2>/dev/null || true
+  if [[ "${KEEP_SMOKE_ARTIFACTS:-}" == "1" ]]; then
+    printf 'web smoke artefacts retained at %s\n' "$TMP"
+    return
+  fi
+  # Chromium helpers can take a moment to release their profile files after
+  # the parent exits. Retry cleanup so a successful smoke is not reported as
+  # failed by this shutdown race.
+  for _ in {1..20}; do
+    rm -rf "$TMP" 2>/dev/null && return
+    sleep 0.1
+  done
+  rm -rf "$TMP"
+}
 trap cleanup EXIT
 
 printf '%s\n' 'browser-smoke-admin-password' > "$TMP/admin-pass"
 chmod 600 "$TMP/admin-pass"
-(cd "$ROOT" && go run ./cmd/server --data "$TMP/data" --listen "127.0.0.1:$PORT" --admin-user admin --admin-pass-file "$TMP/admin-pass") >"$TMP/server.log" 2>&1 &
+(cd "$ROOT" && go build -buildvcs=false -o "$TMP/verstak-sync-server" ./cmd/server)
+"$TMP/verstak-sync-server" --data "$TMP/data" --listen "127.0.0.1:$PORT" --admin-user admin --admin-pass-file "$TMP/admin-pass" >"$TMP/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in {1..30}; do curl --noproxy '*' -fsS "http://127.0.0.1:$PORT/" >/dev/null 2>&1 && break; sleep 1; done
 curl --noproxy '*' -fsS "http://127.0.0.1:$PORT/" >/dev/null

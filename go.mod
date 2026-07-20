@@ -1,6 +1,6 @@
 module github.com/verstak/verstak-sync-server
 
-go 1.25.0
+go 1.25.12
 
 require (
 	github.com/mattn/go-sqlite3 v1.14.46 // indirect

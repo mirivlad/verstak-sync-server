@@ -28,15 +28,17 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 400, "username, email and password required")
 		return
 	}
+	email, ok := normalizeEmailAddress(req.Email)
+	if !ok {
+		jsonErr(w, 400, "invalid email")
+		return
+	}
+	req.Email = email
 	if !s.allowRate(w, r, "register", req.Email) {
 		return
 	}
 	if err := validatePassword(req.Password); err != "" {
 		jsonErr(w, 400, err)
-		return
-	}
-	if !strings.Contains(req.Email, "@") || !strings.Contains(req.Email, ".") {
-		jsonErr(w, 400, "invalid email")
 		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
@@ -56,7 +58,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 	_, err = tx.Exec(
 		"INSERT INTO server_users (id, username, email, password_hash, confirmed, created_at) VALUES (?, ?, ?, ?, 0, ?)",
-		userID, req.Username, strings.ToLower(req.Email), string(hash), now,
+		userID, req.Username, req.Email, string(hash), now,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {

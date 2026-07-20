@@ -108,6 +108,47 @@ func TestHTTPServerUsesExplicitTimeouts(t *testing.T) {
 	}
 }
 
+func TestNormalizeEmailAddressRejectsSMTPHeaderInjection(t *testing.T) {
+	for _, value := range []string{
+		"victim@example.test\r\nBcc: attacker@example.test",
+		"Display Name <victim@example.test>",
+		"not-an-email",
+	} {
+		if _, ok := normalizeEmailAddress(value); ok {
+			t.Errorf("normalizeEmailAddress(%q) accepted an unsafe address", value)
+		}
+	}
+
+	if got, ok := normalizeEmailAddress("  User@Example.Test  "); !ok || got != "user@example.test" {
+		t.Fatalf("normalizeEmailAddress(valid) = %q, %v", got, ok)
+	}
+}
+
+func TestRegistrationRejectsSMTPHeaderInjection(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetupRoutes()
+
+	status, _ := serveJSON(t, s, http.MethodPost, "/api/v1/auth/register", "", map[string]string{
+		"username": "victim",
+		"email":    "victim@example.test\r\nBcc: attacker@example.test",
+		"password": "correct horse battery staple",
+	})
+	if status != http.StatusBadRequest {
+		t.Fatalf("registration status = %d, want %d", status, http.StatusBadRequest)
+	}
+	var count int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM server_users").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("registration stored %d unsafe user records", count)
+	}
+}
+
 func TestHTTPServerGracefulShutdown(t *testing.T) {
 	s, err := newTestServer(t)
 	if err != nil {

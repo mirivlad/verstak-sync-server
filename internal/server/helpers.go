@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/mail"
 	"strings"
 )
 
@@ -105,6 +106,18 @@ func validateStringLength(name, value string, max int) error {
 		return fmt.Errorf("%s is too long", name)
 	}
 	return nil
+}
+
+func normalizeEmailAddress(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 254 || strings.ContainsAny(value, "\r\n") {
+		return "", false
+	}
+	address, err := mail.ParseAddress(value)
+	if err != nil || address.Address != value {
+		return "", false
+	}
+	return strings.ToLower(value), true
 }
 
 func sha256Hex(s string) string {
