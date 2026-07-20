@@ -2,6 +2,25 @@ document.addEventListener("change", function (event) {
   if (event.target.matches("[data-auto-submit]")) event.target.form.requestSubmit();
 });
 
+let dialogOpener = null;
+document.addEventListener("click", function (event) {
+  const opener = event.target.closest("[data-dialog-open]");
+  if (opener) {
+    const dialog = document.getElementById(opener.dataset.dialogOpen);
+    if (!dialog) return;
+    dialogOpener = opener;
+    dialog.showModal();
+    return;
+  }
+  const closer = event.target.closest("[data-dialog-close]");
+  if (closer) closer.closest("dialog")?.close();
+});
+document.addEventListener("close", function (event) {
+  if (!event.target.matches(".management-dialog")) return;
+  if (dialogOpener) dialogOpener.focus();
+  dialogOpener = null;
+}, true);
+
 const confirmationDialog = document.getElementById("confirm-dialog");
 let confirmationForm = null;
 let confirmationButton = null;

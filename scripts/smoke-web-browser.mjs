@@ -73,6 +73,12 @@ async function confirmDialog(expectedPath) {
 	await delay(300);
   await waitFor(async () => new URL(await evaluate("location.href")).pathname === expectedPath, expectedPath);
 }
+async function openRowDialog(rowText) {
+  const before = await evaluate(`(() => { const row = [...document.querySelectorAll('tbody tr')].find((item) => item.textContent.includes(${JSON.stringify(rowText)})); if (!row) throw new Error('row not found: ${rowText}'); const box = row.getBoundingClientRect(); row.querySelector('[data-dialog-open]').click(); return { width: box.width, height: box.height }; })()`);
+  await waitFor(() => evaluate("document.querySelector('.management-dialog[open]') !== null"), "management dialog");
+  const after = await evaluate(`(() => { const row = [...document.querySelectorAll('tbody tr')].find((item) => item.textContent.includes(${JSON.stringify(rowText)})); const box = row.getBoundingClientRect(); return { width: box.width, height: box.height }; })()`);
+  if (Math.abs(before.width - after.width) > 0.5 || Math.abs(before.height - after.height) > 0.5) throw new Error(`opening dialog resized table row: ${JSON.stringify({ before, after })}`);
+}
 
 await cdp("Page.enable");
 await cdp("Runtime.enable");
@@ -113,7 +119,8 @@ await navigate("/admin/users?q=browser-smoke-user");
 // Exercise the destructive confirmation dialog by blocking and unblocking the
 // temporary user. requestSubmit is intentionally not used for this action.
 async function toggleTemporaryUser() {
-  await evaluate(`(() => { const row = [...document.querySelectorAll('tbody tr')].find((item) => item.textContent.includes('browser-smoke-user')); if (!row) throw new Error('temporary user row not found'); const details = row.querySelector('details'); details.open = true; const form = [...row.querySelectorAll('form')].find((item) => item.querySelector('[name=action]')?.value === 'toggle-user'); form.querySelector('[name=password]').value = 'browser-smoke-admin-password'; form.querySelector('button').click(); })()`);
+  await openRowDialog("browser-smoke-user");
+  await evaluate(`(() => { const dialog = document.querySelector('.management-dialog[open]'); const form = [...dialog.querySelectorAll('form')].find((item) => item.querySelector('[name=action]')?.value === 'toggle-user'); form.querySelector('[name=password]').value = 'browser-smoke-admin-password'; form.querySelector('button').click(); })()`);
   await confirmDialog("/admin/users");
   await navigate("/admin/users?q=browser-smoke-user");
 }
@@ -123,7 +130,8 @@ await toggleTemporaryUser();
 // A password reset is generated server-side, rendered once with no secret in
 // the URL, and invalidates any prior user session. Keep it only in this test
 // process so the subsequent user login exercises the generated credential.
-await evaluate(`(() => { const row = [...document.querySelectorAll('tbody tr')].find((item) => item.textContent.includes('browser-smoke-user')); const details = row.querySelector('details'); details.open = true; const form = [...row.querySelectorAll('form')].find((item) => item.querySelector('[name=action]')?.value === 'reset-user-password'); form.querySelector('[name=password]').value = 'browser-smoke-admin-password'; form.querySelector('button').click(); })()`);
+await openRowDialog("browser-smoke-user");
+await evaluate(`(() => { const dialog = document.querySelector('.management-dialog[open]'); const form = [...dialog.querySelectorAll('form')].find((item) => item.querySelector('[name=action]')?.value === 'reset-user-password'); form.querySelector('[name=password]').value = 'browser-smoke-admin-password'; form.querySelector('button').click(); })()`);
 await confirmDialog("/admin/password-result");
 await waitFor(() => evaluate("!['Загрузка...', 'Loading...', '—'].includes(document.querySelector('.one-time-secret')?.textContent.trim())"), "generated one-time password");
 await screenshot("admin-password-result");

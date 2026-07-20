@@ -215,6 +215,24 @@ func TestAuthenticatedLoginRedirectsToMatchingDashboard(t *testing.T) {
 	}
 }
 
+func TestAdminUsersUseManagementDialogs(t *testing.T) {
+	body, err := webFS.ReadFile("web/templates/admin_users.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, forbidden := range []string{"<details", "<summary"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("user table still contains %s", forbidden)
+		}
+	}
+	for _, want := range []string{`data-dialog-open="user-dialog-{{.ID}}"`, `id="user-dialog-{{.ID}}"`, `data-dialog-close`, `value="edit-user"`, `value="toggle-user"`, `value="reset-user-password"`, `value="delete-user"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("user dialog contract is missing %q", want)
+		}
+	}
+}
+
 func TestPublicHomeUsesUnavailablePageWhenReadinessFails(t *testing.T) {
 	s, err := newTestServer(t)
 	if err != nil {
