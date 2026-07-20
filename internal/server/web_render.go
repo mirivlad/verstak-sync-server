@@ -31,6 +31,9 @@ type webPage struct {
 	CurrentPath       string
 	CurrentURL        string
 	CSRF              string
+	AuthScope         string
+	AuthDashboardURL  string
+	AuthLogoutURL     string
 	LocaleCSRF        string
 	Flash             string
 	FlashError        bool
@@ -249,6 +252,7 @@ func (s *Server) renderPageStatus(w http.ResponseWriter, r *http.Request, page s
 	data.CurrentPath = r.URL.Path
 	data.CurrentURL = r.URL.RequestURI()
 	data.LocaleCSRF = s.webLocaleCSRF(w, r)
+	s.applyWebAuthContext(w, r, &data)
 	data.AllowRegistration = s.cfg.Web.AllowRegistration
 	data.Version = Version
 	data.BuildCommit = BuildCommit
@@ -256,7 +260,7 @@ func (s *Server) renderPageStatus(w http.ResponseWriter, r *http.Request, page s
 	if cookie, err := r.Cookie("csrf_token"); err == nil {
 		data.CSRF = cookie.Value
 	}
-	if data.Admin || data.UserName != "" {
+	if data.AuthScope != "guest" || data.Admin || data.UserName != "" {
 		w.Header().Set("Cache-Control", "no-store")
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -267,6 +271,24 @@ func (s *Server) renderPageStatus(w http.ResponseWriter, r *http.Request, page s
 	if err := s.web.templates[page].ExecuteTemplate(w, page, data); err != nil {
 		jsonInternalError(w, err)
 	}
+}
+
+func (s *Server) applyWebAuthContext(w http.ResponseWriter, r *http.Request, data *webPage) {
+	data.AuthScope = "guest"
+	scope, cookieName, dashboardURL, logoutURL := sessionScopeUser, "user_session", "/dashboard", "/logout"
+	if strings.HasPrefix(r.URL.Path, "/admin") {
+		scope, cookieName, dashboardURL, logoutURL = sessionScopeAdmin, "admin_session", "/admin/dashboard", "/admin/logout"
+	}
+	cookie, err := r.Cookie(cookieName)
+	if err != nil {
+		return
+	}
+	if _, ok := s.loadSession(cookie.Value, scope); !ok {
+		return
+	}
+	data.AuthScope = scope
+	data.AuthDashboardURL = dashboardURL
+	data.AuthLogoutURL = logoutURL
 }
 
 var errWebTemplateUnavailable = &webTemplateError{}

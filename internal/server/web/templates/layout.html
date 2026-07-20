@@ -11,21 +11,28 @@
 <body>
   <header class="site-header">
     <a class="brand" href="/" aria-label="{{.ServerName}}"><img src="/static/logo.svg" alt="" width="28" height="28"><span>Verstak Sync</span></a>
-    <nav class="site-nav" aria-label="{{t .Locale "nav.primary"}}">
-      <a href="/login">{{t .Locale "nav.login"}}</a>
-      {{if .AllowRegistration}}<a href="/register">{{t .Locale "nav.register"}}</a>{{end}}
-    </nav>
-    <form class="locale-form" action="/locale" method="post" aria-label="{{t .Locale "locale.label"}}">
-      <input type="hidden" name="from" value="{{.CurrentURL}}">
-	  <input type="hidden" name="locale_csrf" value="{{.LocaleCSRF}}">
-      <label class="sr-only" for="locale">{{t .Locale "locale.label"}}</label>
-      <select id="locale" name="locale" data-auto-submit>
-        <option value="system" {{if eq .LocalePreference "system"}}selected{{end}}>{{t .Locale "locale.system"}}</option>
-        <option value="ru" {{if eq .LocalePreference "ru"}}selected{{end}}>Русский</option>
-        <option value="en" {{if eq .LocalePreference "en"}}selected{{end}}>English</option>
-      </select>
-      <button class="sr-only" type="submit">{{t .Locale "locale.apply"}}</button>
-    </form>
+    <div class="header-actions">
+      <form class="locale-form" action="/locale" method="post" aria-label="{{t .Locale "locale.label"}}">
+        <input type="hidden" name="from" value="{{.CurrentURL}}">
+        <input type="hidden" name="locale_csrf" value="{{.LocaleCSRF}}">
+        <label class="sr-only" for="locale">{{t .Locale "locale.label"}}</label>
+        <select id="locale" name="locale" data-auto-submit>
+          <option value="system" {{if eq .LocalePreference "system"}}selected{{end}}>{{t .Locale "locale.system"}}</option>
+          <option value="ru" {{if eq .LocalePreference "ru"}}selected{{end}}>Русский</option>
+          <option value="en" {{if eq .LocalePreference "en"}}selected{{end}}>English</option>
+        </select>
+        <button class="sr-only" type="submit">{{t .Locale "locale.apply"}}</button>
+      </form>
+      <nav class="site-nav" aria-label="{{t .Locale "nav.primary"}}">
+        {{if eq .AuthScope "guest"}}
+          <a href="/login">{{t .Locale "nav.login"}}</a>
+          {{if .AllowRegistration}}<a href="/register">{{t .Locale "nav.register"}}</a>{{end}}
+        {{else}}
+          <a href="{{.AuthDashboardURL}}">{{t .Locale "server.dashboard"}}</a>
+          <form method="post" action="{{.AuthLogoutURL}}"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button class="link-button" type="submit">{{t .Locale "auth.logout"}}</button></form>
+        {{end}}
+      </nav>
+    </div>
   </header>
   <main class="page-shell">{{template "content" .}}</main>
   <footer class="site-footer"><span>{{.ServerName}}</span><span>{{t .Locale "footer.localFirst"}}</span></footer>

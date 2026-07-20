@@ -126,6 +126,95 @@ func TestPublicHomeUsesSharedLocalizedTemplateLayout(t *testing.T) {
 	}
 }
 
+func TestSharedHeaderReflectsAuthenticationScope(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetupRoutes()
+	if _, err := s.db.Exec("INSERT INTO server_users (id,username,email,password_hash,confirmed,created_at) VALUES ('u1','alice','alice@example.test','hash',1,'2026-01-01T00:00:00Z')"); err != nil {
+		t.Fatal(err)
+	}
+	userToken, userCSRF, err := s.createSession(sessionScopeUser, "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken, adminCSRF, err := s.createSession(sessionScopeAdmin, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name, path, cookie, token, csrf, dashboard, logout string
+		guest                                              bool
+	}{
+		{name: "guest", path: "/", guest: true},
+		{name: "user", path: "/dashboard", cookie: "user_session", token: userToken, csrf: userCSRF, dashboard: "/dashboard", logout: "/logout"},
+		{name: "admin", path: "/admin/dashboard", cookie: "admin_session", token: adminToken, csrf: adminCSRF, dashboard: "/admin/dashboard", logout: "/admin/logout"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			if tc.cookie != "" {
+				req.AddCookie(&http.Cookie{Name: tc.cookie, Value: tc.token})
+				req.AddCookie(&http.Cookie{Name: "csrf_token", Value: tc.csrf})
+			}
+			res := httptest.NewRecorder()
+			s.Handler().ServeHTTP(res, req)
+			if res.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", res.Code, res.Body.String())
+			}
+			body := res.Body.String()
+			localeAt := strings.Index(body, `class="locale-form"`)
+			if localeAt < 0 {
+				t.Fatalf("locale selector is missing: %s", body)
+			}
+			if tc.guest {
+				loginAt := strings.Index(body, `href="/login"`)
+				if loginAt < 0 || !strings.Contains(body, `href="/register"`) || localeAt > loginAt {
+					t.Fatalf("guest navigation is missing or ordered incorrectly: %s", body)
+				}
+				return
+			}
+			if strings.Contains(body, `href="/login"`) || strings.Contains(body, `href="/register"`) {
+				t.Fatalf("authenticated header still offers guest authentication: %s", body)
+			}
+			if !strings.Contains(body, `href="`+tc.dashboard+`"`) || !strings.Contains(body, `action="`+tc.logout+`"`) {
+				t.Fatalf("authenticated navigation is incomplete: %s", body)
+			}
+			if strings.Count(body, `action="`+tc.logout+`"`) != 1 {
+				t.Fatalf("logout is duplicated: %s", body)
+			}
+		})
+	}
+}
+
+func TestAuthenticatedLoginRedirectsToMatchingDashboard(t *testing.T) {
+	s, err := newTestServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetupRoutes()
+	for _, tc := range []struct{ path, cookie, scope, subject, want string }{
+		{path: "/login", cookie: "user_session", scope: sessionScopeUser, subject: "u1", want: "/dashboard"},
+		{path: "/admin/login", cookie: "admin_session", scope: sessionScopeAdmin, subject: "admin", want: "/admin/dashboard"},
+	} {
+		token, _, err := s.createSession(tc.scope, tc.subject)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req.AddCookie(&http.Cookie{Name: tc.cookie, Value: token})
+		res := httptest.NewRecorder()
+		s.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusFound || res.Header().Get("Location") != tc.want {
+			t.Fatalf("%s = %d %q, want redirect to %s", tc.path, res.Code, res.Header().Get("Location"), tc.want)
+		}
+	}
+}
+
 func TestPublicHomeUsesUnavailablePageWhenReadinessFails(t *testing.T) {
 	s, err := newTestServer(t)
 	if err != nil {

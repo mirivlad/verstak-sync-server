@@ -9,6 +9,5 @@
   <a href="/admin/audit" {{if eq .AdminPage "audit"}}aria-current="page"{{end}}>{{t .Locale "admin.audit"}}</a>
   <a href="/admin/settings" {{if eq .AdminPage "settings"}}aria-current="page"{{end}}>{{t .Locale "admin.settings"}}</a>
   <a href="/admin/diagnostics" {{if eq .AdminPage "diagnostics"}}aria-current="page"{{end}}>{{t .Locale "admin.diagnostics"}}</a>
-  <form method="post" action="/admin/logout"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button class="link-button" type="submit">{{t .Locale "auth.logout"}}</button></form>
 </aside>
 {{end}}

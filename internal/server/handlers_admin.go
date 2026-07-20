@@ -16,6 +16,12 @@ import (
 func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
+		if cookie, err := r.Cookie("admin_session"); err == nil {
+			if _, ok := s.loadSession(cookie.Value, sessionScopeAdmin); ok {
+				http.Redirect(w, r, "/admin/dashboard", http.StatusFound)
+				return
+			}
+		}
 		s.renderPage(w, r, "admin_login", webPage{Title: "admin.loginTitle", Admin: true})
 	case "POST":
 		if err := r.ParseForm(); err != nil {

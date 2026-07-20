@@ -214,6 +214,12 @@ func (s *Server) handleUserWebReset(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUserWebLogin(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if cookie, err := r.Cookie("user_session"); err == nil {
+			if _, ok := s.loadSession(cookie.Value, sessionScopeUser); ok {
+				http.Redirect(w, r, "/dashboard", http.StatusFound)
+				return
+			}
+		}
 		s.renderPage(w, r, "login", webPage{Title: "auth.loginTitle"})
 	case http.MethodPost:
 		if err := r.ParseForm(); err != nil {
