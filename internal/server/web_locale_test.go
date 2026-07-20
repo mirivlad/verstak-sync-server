@@ -233,6 +233,22 @@ func TestAdminUsersUseManagementDialogs(t *testing.T) {
 	}
 }
 
+func TestAdminDevicesUseManagementDialogs(t *testing.T) {
+	body, err := webFS.ReadFile("web/templates/admin_devices.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{`data-dialog-open="device-dialog-{{.ID}}"`, `id="device-dialog-{{.ID}}"`, `data-dialog-close`, `name="password"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("device dialog contract is missing %q", want)
+		}
+	}
+	if strings.Contains(text, `class="inline-form"`) {
+		t.Fatalf("device table still contains an inline management form")
+	}
+}
+
 func TestPublicHomeUsesUnavailablePageWhenReadinessFails(t *testing.T) {
 	s, err := newTestServer(t)
 	if err != nil {

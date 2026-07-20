@@ -142,7 +142,8 @@ await navigate("/admin/users?q=browser-smoke-user");
 // Revoke the real temporary device through the browser UI and assert the
 // modal path again.
 await navigate("/admin/devices?q=Browser%20smoke");
-await evaluate(`(() => { const row = [...document.querySelectorAll('tbody tr')].find((item) => item.textContent.includes('Browser smoke laptop')); if (!row) throw new Error('smoke device row not found'); const form = row.querySelector('form'); form.querySelector('[name=password]').value = 'browser-smoke-admin-password'; form.querySelector('button').click(); })()`);
+await openRowDialog("Browser smoke laptop");
+await evaluate(`(() => { const dialog = document.querySelector('.management-dialog[open]'); const form = dialog.querySelector('form'); form.querySelector('[name=password]').value = 'browser-smoke-admin-password'; form.querySelector('button').click(); })()`);
 await confirmDialog("/admin/devices");
 
 // Server-side filters and HTML logout complete the browser path.
