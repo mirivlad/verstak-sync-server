@@ -1,0 +1,32 @@
+# Create the external proxy network before deploying the stack.
+# Set the three required environment variables in Portainer's stack editor.
+services:
+  sync-server:
+    image: ghcr.io/mirivlad/verstak-sync-server:${VERSTAK_IMAGE_TAG:?set a published image tag}
+    restart: unless-stopped
+    environment:
+      VERSTAK_LISTEN: 0.0.0.0:47732
+      VERSTAK_PUBLIC_URL: ${VERSTAK_PUBLIC_URL:?set the public HTTPS URL}
+      VERSTAK_TRUSTED_PROXIES: ${VERSTAK_TRUSTED_PROXIES:?set the proxy IP or CIDR}
+    volumes:
+      - verstak-data:/data
+    networks:
+      - proxy
+    expose:
+      - "47732"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+
+volumes:
+  verstak-data:
+
+networks:
+  proxy:
+    external: true
+    name: ${VERSTAK_PROXY_NETWORK:-proxy}

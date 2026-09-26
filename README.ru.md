@@ -66,6 +66,8 @@ curl http://127.0.0.1:47732/api/v1/health
 
 ## Развёртывание
 
+Для Docker/GHCR и готового стека Portainer см. [контейнерное развёртывание](docs/container.ru.md).
+
 В production сервер должен работать за HTTPS. Сам сервер слушает plain HTTP;
 TLS терминируется в обратном прокси (nginx, Caddy).
 
@@ -75,7 +77,7 @@ TLS терминируется в обратном прокси (nginx, Caddy).
 location / {
   proxy_pass http://127.0.0.1:47732;
   proxy_set_header Host $host;
-  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-For $remote_addr;
   proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```

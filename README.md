@@ -73,6 +73,7 @@ annotated tag when necessary, then creates or updates the GitHub Release.
 | `--admin-user` | | Create admin user (first run) |
 | `--admin-pass-file` | | Read the initial admin password from a protected file |
 | `--admin-pass-stdin` | | Read the initial admin password from stdin |
+| `--init-admin` | | Create or update an admin user and exit (one-time container setup) |
 
 The server has explicit header/read/write/idle timeouts and a 16 KiB header
 limit. It handles SIGINT/SIGTERM with a 20-second graceful shutdown and closes
@@ -129,6 +130,9 @@ directory, writes `/etc/verstak-server/env`, installs the systemd unit, and
 starts the service.
 
 ## Deployment
+
+For the GHCR image and a ready-to-paste Portainer stack, see the
+[container deployment guide (Russian)](docs/container.ru.md).
 
 Run the service behind HTTPS in production. The sync server itself listens on
 plain HTTP; terminate TLS in a reverse proxy such as nginx, Caddy, or a platform
@@ -346,7 +350,7 @@ listed in `trusted_proxies`. For a local nginx/Caddy proxy use
 location / {
   proxy_pass http://127.0.0.1:47732;
   proxy_set_header Host $host;
-  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-For $remote_addr;
   proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```

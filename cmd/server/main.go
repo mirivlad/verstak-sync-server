@@ -25,6 +25,7 @@ func main() {
 	adminUser := flag.String("admin-user", "", "Create admin user (first run)")
 	adminPassFile := flag.String("admin-pass-file", "", "Read initial admin password from a 0600 file")
 	adminPassStdin := flag.Bool("admin-pass-stdin", false, "Read initial admin password from stdin")
+	initAdmin := flag.Bool("init-admin", false, "Create or update an admin user and exit (for one-time setup)")
 	showVersion := flag.Bool("version", false, "Print build version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -72,11 +73,17 @@ func main() {
 	if (*adminUser == "") != (adminPass == "") {
 		log.Fatal("admin-user and one admin password source must be supplied together")
 	}
+	if *initAdmin && *adminUser == "" {
+		log.Fatal("init-admin requires admin-user and one admin password source")
+	}
 	if *adminUser != "" {
 		if err := cfg.SetAdmin(*adminUser, adminPass); err != nil {
 			log.Fatalf("set admin: %v", err)
 		}
 		log.Printf("initial admin user %q configured", *adminUser)
+	}
+	if *initAdmin {
+		return
 	}
 
 	dbPath := filepath.Join(absData, "server.db")

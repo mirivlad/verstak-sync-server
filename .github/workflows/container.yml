@@ -1,0 +1,51 @@
+name: container
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test ./...
+      - name: Build and publish image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${REPOSITORY,,}"
+          if [[ "$EVENT_NAME" == release ]]; then
+            version="$RELEASE_TAG"
+            tags=("$RELEASE_TAG")
+          else
+            version="dev-${COMMIT:0:12}"
+            tags=("sha-${COMMIT:0:12}" main)
+          fi
+          docker build --pull --build-arg "VERSION=$version" --build-arg "BUILD_COMMIT=$COMMIT" -t "$image:${tags[0]}" .
+          ./scripts/test-container.sh "$image:${tags[0]}"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          for tag in "${tags[@]}"; do
+            if [[ "$tag" != "${tags[0]}" ]]; then
+              docker tag "$image:${tags[0]}" "$image:$tag"
+            fi
+            docker push "$image:$tag"
+          done
