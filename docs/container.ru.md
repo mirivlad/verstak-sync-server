@@ -1,0 +1,82 @@
+# Контейнер и Portainer
+
+Для Portainer на Docker Standalone используйте Compose-стек ниже. Образ
+`ghcr.io/mirivlad/verstak-sync-server` собирается GitHub Actions после
+push в `main` (теги `main` и `sha-<12 символов commit>`) и публикации GitHub
+Release (тег версии). Пока публикуется образ `linux/amd64`. Для production
+используйте **конкретный тег версии или commit**, не плавающий `main`.
+Перед первым pull проверьте, опубликован ли
+образ в GHCR: если пакет закрыт, добавьте учётные данные GHCR в Portainer;
+одного файла стека недостаточно для доступа к закрытому пакету.
+
+## Установка
+
+1. Создайте Docker-сеть для прокси и сервера, например `proxy`. Прокси должен
+   быть подключён к этой сети. Сеть не должна содержать недоверенных
+   контейнеров, если доверенный прокси задан её CIDR.
+2. В Portainer откройте **Stacks → Add stack → Web editor** и вставьте
+   [`compose.portainer.yml`](../compose.portainer.yml). Задайте переменные стека:
+   `VERSTAK_IMAGE_TAG` (опубликованная версия или `sha-*`),
+   `VERSTAK_PUBLIC_URL` (например, `https://sync.example.org`),
+   `VERSTAK_TRUSTED_PROXIES` (IP/CIDR *только* вашего прокси). При другом имени
+   сети задайте `VERSTAK_PROXY_NETWORK`. Разверните стек.
+3. Настройте прокси на `http://sync-server:47732` внутри этой сети. Он должен
+   сохранять `Host` и передавать `X-Forwarded-Proto` и `X-Forwarded-For`.
+   Для одного прокси перезаписывайте входящий `X-Forwarded-For`, иначе клиент
+   сможет подставить ложный IP в заголовок.
+   Пример для nginx:
+
+   ```nginx
+   location / {
+       proxy_pass http://sync-server:47732;
+       proxy_set_header Host $host;
+       proxy_set_header X-Forwarded-Proto $scheme;
+       proxy_set_header X-Forwarded-For $remote_addr;
+       client_max_body_size 300m;
+   }
+   ```
+
+   Размещайте сервер на корне отдельного HTTPS-домена, не на подпути:
+   веб-маршруты и cookie используют абсолютные пути. Порт контейнера не
+   публикуется на хосте; `0.0.0.0` внутри контейнера нужен для доступа прокси.
+   Не доверяйте всем адресам (`0.0.0.0/0`). Если IP прокси динамический,
+   закрепите его либо используйте выделенную сеть только для прокси и сервера.
+4. Создайте администратора однократно. Остановите контейнер стека, узнайте
+   имя его тома (`<имя-стека>_verstak-data`) и выполните на Docker-хосте:
+
+   ```bash
+   read -rsp 'Admin password: ' VERSTAK_BOOTSTRAP_PASSWORD; echo
+   printf '%s\n' "$VERSTAK_BOOTSTRAP_PASSWORD" | docker run --rm -i --network none \
+     -v '<имя-стека>_verstak-data:/data' \
+     ghcr.io/mirivlad/verstak-sync-server:<тот-же-тег> \
+     --data /data --init-admin --admin-user admin --admin-pass-stdin
+   unset VERSTAK_BOOTSTRAP_PASSWORD
+   ```
+
+   Затем запустите контейнер в Portainer. Пароль не хранится в переменных
+   стека или аргументах процесса. Для сброса пароля повторите процедуру при
+   остановленном сервере. Проверяйте `/readyz` и вход по публичному HTTPS URL.
+
+## Обновление и восстановление
+
+Перед обновлением остановите сервер и сохраните **весь** том `/data`: SQLite
+работает в WAL-режиме, поэтому копирование только `server.db` во время работы
+не является корректной резервной копией. Например, после создания каталога
+`/srv/verstak-backups` на Docker-хосте:
+
+```bash
+docker run --rm --user 0 --network none \
+  -v '<имя-стека>_verstak-data:/data:ro' -v '/srv/verstak-backups:/backup' \
+  --entrypoint tar ghcr.io/mirivlad/verstak-sync-server:<текущий-тег> \
+  -C /data -czf /backup/verstak-data-before-update.tar.gz .
+```
+
+Проверьте целостность архива и храните копию отдельно от хоста. Затем измените
+`VERSTAK_IMAGE_TAG` в Portainer, выполните pull/redeploy и проверьте `/readyz`,
+вход и синхронизацию клиента.
+
+Откат на старый образ после миграции схемы не гарантирован. Для отката
+остановите сервер, восстановите **весь** `/data` из снимка перед обновлением
+в отдельный пустой том и только затем запускайте прежний образ. Не
+восстанавливайте архив поверх работающей базы. Восстановление можно проверить
+на временном томе и тестовом контейнере до переключения рабочего стека.

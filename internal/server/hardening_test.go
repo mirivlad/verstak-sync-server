@@ -211,6 +211,37 @@ func TestClientIPUsesTrustedProxyHeadersOnlyForTrustedPeer(t *testing.T) {
 	}
 }
 
+func TestHTTPSBehindTrustedProxyUsesSecureCookiesAndPublicOrigin(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PublicURL = "https://sync.example.test"
+	cfg.TrustedProxies = []string{"10.0.0.5/32"}
+	s, err := newServerForTest(t, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	r := httptest.NewRequest(http.MethodPost, "http://sync.example.test/admin/action", nil)
+	r.RemoteAddr = "10.0.0.5:4040"
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("Origin", "https://sync.example.test")
+	if !s.requestIsHTTPS(r) || !s.sameOrigin(r) {
+		t.Fatal("trusted HTTPS proxy did not preserve secure origin")
+	}
+	w := httptest.NewRecorder()
+	s.setSessionCookies(w, r, sessionScopeAdmin, "session", "csrf")
+	for _, cookie := range w.Result().Cookies() {
+		if !cookie.Secure {
+			t.Fatalf("cookie %q must be Secure behind HTTPS proxy", cookie.Name)
+		}
+	}
+
+	r.RemoteAddr = "10.0.0.6:4040"
+	if s.requestIsHTTPS(r) {
+		t.Fatal("untrusted peer must not set HTTPS through forwarding headers")
+	}
+}
+
 func TestRateLimiterRecoversAfterWindow(t *testing.T) {
 	now := time.Now().UTC()
 	limiter := newRateLimiter(func() time.Time { return now })
