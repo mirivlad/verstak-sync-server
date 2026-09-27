@@ -1,0 +1,27 @@
+# For a system nginx on the same Linux host, not a containerized proxy.
+# Set the public URL and initial admin password in Portainer's stack editor.
+services:
+  sync-server:
+    image: ghcr.io/mirivlad/verstak-sync-server:${VERSTAK_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      VERSTAK_LISTEN: 127.0.0.1:47732
+      VERSTAK_PUBLIC_URL: ${VERSTAK_PUBLIC_URL:?set the public HTTPS URL}
+      VERSTAK_TRUSTED_PROXIES: 127.0.0.1/32
+      VERSTAK_REQUIRE_ADMIN: "1"
+      VERSTAK_BOOTSTRAP_ADMIN_USER: ${VERSTAK_BOOTSTRAP_ADMIN_USER:-admin}
+      VERSTAK_BOOTSTRAP_ADMIN_PASSWORD: ${VERSTAK_BOOTSTRAP_ADMIN_PASSWORD:-}
+    volumes:
+      - verstak-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+
+volumes:
+  verstak-data:

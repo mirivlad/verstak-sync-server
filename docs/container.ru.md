@@ -1,5 +1,48 @@
 # Контейнер и Portainer
 
+## Portainer и системный Nginx на одном Linux-хосте
+
+Для этого варианта используйте [`compose.portainer.host-nginx.yml`](../compose.portainer.host-nginx.yml).
+В Portainer выберите **Stacks → Add stack → Git repository**, укажите
+`https://github.com/mirivlad/verstak-sync-server`, ветку `main` и путь к
+Compose-файлу `compose.portainer.host-nginx.yml`. Можно также вставить этот
+файл в Web editor. Задайте переменные стека:
+
+- `VERSTAK_PUBLIC_URL` — публичный HTTPS URL, например `https://sync.example.org`;
+- `VERSTAK_BOOTSTRAP_ADMIN_PASSWORD` — пароль первого администратора длиной
+  не менее 12 символов;
+- `VERSTAK_BOOTSTRAP_ADMIN_USER` — необязательно, по умолчанию `admin`;
+- `VERSTAK_IMAGE_TAG` — необязательно, по умолчанию `latest`.
+
+После **Deploy the stack** сервер сам создаст администратора, если его ещё
+нет в томе. Пароль сохраняется в `config.yml` только в виде bcrypt-хеша;
+переменная окружения остаётся видимой администраторам Docker/Portainer.
+После первого входа удалите `VERSTAK_BOOTSTRAP_ADMIN_PASSWORD` из переменных
+стека и обновите стек. Повторный запуск не меняет уже созданный пароль.
+
+Контейнер использует host network, но слушает только `127.0.0.1:47732`.
+Системный Nginx на том же хосте направьте на этот адрес:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:47732;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    client_max_body_size 300m;
+}
+```
+
+Nginx должен обслуживать HTTPS на отдельном домене, совпадающем с
+`VERSTAK_PUBLIC_URL`; подпуть не поддерживается. Проверьте `/readyz` и вход
+по `/admin/login`. В этом варианте не требуется Docker-сеть для прокси,
+публикация порта или отдельный контейнер для создания администратора.
+Host network даёт контейнеру доступ к сетевому пространству хоста, поэтому
+используйте этот файл только для доверенного образа на Linux-хосте с
+системным Nginx.
+
+## Portainer и контейнерный reverse proxy
+
 Для Portainer на Docker Standalone используйте Compose-стек ниже. Образ
 `ghcr.io/mirivlad/verstak-sync-server` собирается GitHub Actions после
 push в `main` (теги `main` и `sha-<12 символов commit>`) и публикации GitHub
