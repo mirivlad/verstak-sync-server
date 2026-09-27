@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/verstak/verstak-sync-server/internal/server"
 )
@@ -85,6 +86,9 @@ func main() {
 	if *initAdmin {
 		return
 	}
+	if err := bootstrapAdminFromEnv(cfg); err != nil {
+		log.Fatalf("bootstrap admin: %v", err)
+	}
 
 	dbPath := filepath.Join(absData, "server.db")
 	srv, err := server.NewServer(dbPath, absData, cfg)
@@ -127,6 +131,31 @@ func main() {
 	if err := srv.Close(); err != nil {
 		log.Printf("close database: %v", err)
 	}
+}
+
+func bootstrapAdminFromEnv(cfg *server.Config) error {
+	if len(cfg.Admin) != 0 {
+		return nil
+	}
+	password := os.Getenv("VERSTAK_BOOTSTRAP_ADMIN_PASSWORD")
+	if password == "" {
+		if os.Getenv("VERSTAK_REQUIRE_ADMIN") == "1" {
+			return fmt.Errorf("set VERSTAK_BOOTSTRAP_ADMIN_PASSWORD for the first start")
+		}
+		return nil
+	}
+	if utf8.RuneCountInString(password) < 12 || strings.TrimSpace(password) == "" {
+		return fmt.Errorf("VERSTAK_BOOTSTRAP_ADMIN_PASSWORD must contain at least 12 characters")
+	}
+	username := strings.TrimSpace(os.Getenv("VERSTAK_BOOTSTRAP_ADMIN_USER"))
+	if username == "" {
+		username = "admin"
+	}
+	if err := cfg.SetAdmin(username, password); err != nil {
+		return err
+	}
+	log.Printf("initial admin user %q configured", username)
+	return nil
 }
 
 func initialAdminPassword(path string, useStdin bool) (string, error) {
