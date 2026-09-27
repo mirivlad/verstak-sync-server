@@ -3,12 +3,14 @@ set -euo pipefail
 
 IMAGE="${1:-verstak-sync-server:container-smoke}"
 CONTAINER="verstak-sync-smoke-$$"
+INIT_CONTAINER="verstak-sync-init-smoke-$$"
 VOLUME="verstak-sync-smoke-$$"
 RESTORE_VOLUME="verstak-sync-restore-smoke-$$"
 COOKIE_JAR="$(mktemp)"
 
 cleanup() {
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$INIT_CONTAINER" >/dev/null 2>&1 || true
   docker volume rm "$VOLUME" >/dev/null 2>&1 || true
   docker volume rm "$RESTORE_VOLUME" >/dev/null 2>&1 || true
   rm -f "$COOKIE_JAR"
@@ -22,9 +24,28 @@ docker volume create "$RESTORE_VOLUME" >/dev/null
 
 # The first-run password is delivered only through stdin, never via a stack
 # environment variable or a process argument.
-printf '%s\n' 'container-smoke-password' | docker run --rm -i --network none \
-  --mount "type=volume,src=$VOLUME,dst=/data" "$IMAGE" \
-  --data /data --init-admin --admin-user smoke --admin-pass-stdin
+if docker run --rm --network none "$IMAGE" --help 2>&1 | grep -q -- '-init-admin'; then
+  printf '%s\n' 'container-smoke-password' | docker run --rm -i --network none \
+    --mount "type=volume,src=$VOLUME,dst=/data" "$IMAGE" \
+    --data /data --init-admin --admin-user smoke --admin-pass-stdin
+else
+  # Older releases create the admin on normal startup rather than exiting.
+  printf '%s\n' 'container-smoke-password' | docker run --rm -i --name "$INIT_CONTAINER" \
+    --network none --mount "type=volume,src=$VOLUME,dst=/data" "$IMAGE" \
+    --data /data --admin-user smoke --admin-pass-stdin >/dev/null 2>&1 &
+  bootstrap_pid=$!
+  for attempt in $(seq 1 30); do
+    if docker run --rm --network none --mount "type=volume,src=$VOLUME,dst=/data,readonly" \
+      --entrypoint test "$IMAGE" -s /data/config.yml; then
+      break
+    fi
+    sleep 1
+  done
+  docker run --rm --network none --mount "type=volume,src=$VOLUME,dst=/data,readonly" \
+    --entrypoint test "$IMAGE" -s /data/config.yml
+  docker stop "$INIT_CONTAINER" >/dev/null
+  wait "$bootstrap_pid" || true
+fi
 
 docker run -d --name "$CONTAINER" \
   --mount "type=volume,src=$VOLUME,dst=/data" \
