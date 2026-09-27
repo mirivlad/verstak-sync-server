@@ -1,8 +1,8 @@
 # Create the external proxy network before deploying the stack.
-# Set the three required environment variables in Portainer's stack editor.
+# Set the public URL and trusted proxies in Portainer's stack editor.
 services:
   sync-server:
-    image: ghcr.io/mirivlad/verstak-sync-server:${VERSTAK_IMAGE_TAG:?set a published image tag}
+    image: ghcr.io/mirivlad/verstak-sync-server:${VERSTAK_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       VERSTAK_LISTEN: 0.0.0.0:47732

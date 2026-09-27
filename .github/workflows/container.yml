@@ -5,6 +5,12 @@ on:
     branches: [main]
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing GitHub Release tag to publish as a container
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -13,34 +19,56 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    concurrency:
+      group: container-${{ github.event_name == 'push' && 'main' || 'release' }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || github.sha }}
+          ref: main
+      - uses: actions/checkout@v4
+        if: github.event_name != 'push'
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
+          path: release-source
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: ${{ github.event_name == 'push' && 'go.mod' || 'release-source/go.mod' }}
           cache: true
-      - run: go test ./...
+      - name: Test release source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == push ]]; then
+            go test ./...
+          else
+            cd release-source
+            go test ./...
+          fi
       - name: Build and publish image
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
           ACTOR: ${{ github.actor }}
           EVENT_NAME: ${{ github.event_name }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
           COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
           image="ghcr.io/${REPOSITORY,,}"
-          if [[ "$EVENT_NAME" == release ]]; then
+          if [[ "$EVENT_NAME" != push ]]; then
+            gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft == false' | grep -qx true
             version="$RELEASE_TAG"
             tags=("$RELEASE_TAG")
+            context=release-source
+            COMMIT="$(git -C release-source rev-parse HEAD)"
           else
             version="dev-${COMMIT:0:12}"
             tags=("sha-${COMMIT:0:12}" main)
+            context=.
           fi
-          docker build --pull --build-arg "VERSION=$version" --build-arg "BUILD_COMMIT=$COMMIT" -t "$image:${tags[0]}" .
+          docker build --pull -f Dockerfile --build-arg "VERSION=$version" --build-arg "BUILD_COMMIT=$COMMIT" -t "$image:${tags[0]}" "$context"
           ./scripts/test-container.sh "$image:${tags[0]}"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
           for tag in "${tags[@]}"; do
@@ -49,3 +77,10 @@ jobs:
             fi
             docker push "$image:$tag"
           done
+          if [[ "$EVENT_NAME" != push ]]; then
+            latest_release="$(gh api "repos/$REPOSITORY/releases?per_page=100" --paginate | jq -s -r '[.[][] | select(.draft == false and .published_at != null)] | max_by(.published_at).tag_name')"
+            if [[ "$RELEASE_TAG" == "$latest_release" ]]; then
+              docker tag "$image:$RELEASE_TAG" "$image:latest"
+              docker push "$image:latest"
+            fi
+          fi
